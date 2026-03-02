@@ -1,0 +1,90 @@
+{
+  "session_meta": {
+    "is_demo": true,
+    "outgoing_nurse": "Nurse Sarah Chen, RN",
+    "incoming_nurse": "Nurse Marcus Rivera, RN",
+    "unit": "ICU",
+    "shift": "Night to Day",
+    "handoff_type": "Bedside verbal handoff"
+  },
+  "patient": {
+    "name": "Sarah Mitchell",
+    "age": "67",
+    "mrn": "ICU-2024-0447",
+    "room": "ICU 4B"
+  },
+  "situation": {
+    "primary_diagnosis": "Septic shock secondary to pneumonia",
+    "reason_for_admission": "Transferred from ED after hypotension, hypoxia, and elevated lactate",
+    "current_status": "Hemodynamically unstable, on vasopressor support with high-flow oxygen"
+  },
+  "background": {
+    "relevant_history": "Hypertension, Type 2 diabetes mellitus, CKD stage 2",
+    "medications": [
+      "Norepinephrine 0.1 mcg/kg/min IV continuous",
+      "Vancomycin 1g IV q12h",
+      "Piperacillin-Tazobactam 3.375g IV q6h",
+      "Heparin 5000 units SubQ q8h (DVT prophylaxis)",
+      "Insulin sliding scale AC/HS"
+    ],
+    "allergies": [
+      "Penicillin (anaphylaxis)",
+      "Latex (rash)"
+    ],
+    "recent_procedures": [
+      "Right subclavian central line placement",
+      "Left radial arterial line insertion",
+      "Foley catheter insertion"
+    ]
+  },
+  "assessment": {
+    "vitals": {
+      "bp": "88/54",
+      "hr": 118,
+      "rr": 24,
+      "temp": 38.9,
+      "spo2": 91
+    },
+    "labs_pending": [
+      "Blood cultures x2",
+      "Repeat serum lactate (2-hour)",
+      "CBC with differential",
+      "BMP"
+    ],
+    "labs_recent": [
+      "Lactate 4.2 mmol/L (high)",
+      "WBC 18.4 x10^9/L (high)",
+      "Procalcitonin 22.1 ng/mL (high)",
+      "Creatinine 1.6 mg/dL"
+    ]
+  },
+  "recommendation": {
+    "care_plan": "Continue sepsis bundle, titrate norepinephrine to maintain MAP >= 65 mmHg, continue broad-spectrum antibiotics pending cultures",
+    "escalation_triggers": "MAP < 65, SpO2 < 88%, altered mental status, urine output < 30 mL/hr",
+    "pending_orders": [
+      "Repeat lactate in 2 hours",
+      "Echocardiogram",
+      "Infectious Disease consult",
+      "Pharmacy antibiotic review for allergy safety"
+    ],
+    "next_steps": "Q1h vitals, strict I/O, family update at 0800, reassess pressor need after repeat labs"
+  },
+  "risk_alert_candidates": [
+    {
+      "severity": "HIGH",
+      "category": "medication",
+      "description": "Piperacillin-Tazobactam includes penicillin in a patient with documented penicillin anaphylaxis"
+    },
+    {
+      "severity": "HIGH",
+      "category": "vital",
+      "description": "SpO2 91% on high-flow oxygen indicates persistent hypoxemia"
+    },
+    {
+      "severity": "HIGH",
+      "category": "vital",
+      "description": "BP 88/54 suggests ongoing shock despite vasopressor therapy"
+    }
+  ],
+  "transcript_seed": "Patient Sarah Mitchell in ICU 4B, 67-year-old admitted with septic shock from pneumonia. On norepinephrine, low blood pressure 88/54, heart rate 118, O2 sat 91% on high-flow, temp 38.9. Allergic to penicillin. Awaiting blood cultures and repeat lactate. Escalate for MAP below 65 or saturation below 88."
+}
