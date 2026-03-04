@@ -13,6 +13,7 @@ const INITIAL_STATE = {
   alerts: [],
   report: null,
   message: "",
+  recordingId: null,
 };
 
 /**
@@ -48,6 +49,23 @@ export function useWebSocket({ onComplete, onError } = {}) {
           ...prev,
           stage: "listening",
           message: data.message || "",
+        }));
+        break;
+
+      case "saving":
+        setSessionState((prev) => ({
+          ...prev,
+          stage: "saving",
+          message: data.message || "Saving audio locally…",
+        }));
+        break;
+
+      case "saved":
+        setSessionState((prev) => ({
+          ...prev,
+          stage: "saved",
+          message: data.message || "",
+          recordingId: data.recording_id || null,
         }));
         break;
 
@@ -127,7 +145,7 @@ export function useWebSocket({ onComplete, onError } = {}) {
 
   /** Open connection and send the start message */
   const connect = useCallback(
-    (outgoing, incoming, token) => {
+    (outgoing, incoming, token, language = "en") => {
       // Close any existing connection
       if (ws.current) {
         ws.current.close();
@@ -143,7 +161,7 @@ export function useWebSocket({ onComplete, onError } = {}) {
       ws.current = socket;
 
       socket.onopen = () => {
-        socket.send(JSON.stringify({ type: "start", outgoing, incoming }));
+        socket.send(JSON.stringify({ type: "start", outgoing, incoming, language }));
       };
 
       socket.onmessage = (event) => {

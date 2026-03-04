@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import speech_recognition as sr
 
+# pydub is configured globally in backend/__init__.py (imageio-ffmpeg)
+
 # WebM header is typically ~200-500 bytes; keep threshold low to avoid false negatives
 _MIN_AUDIO_BYTES = 256
 
@@ -61,33 +63,30 @@ _NATIVE_FORMATS = {".wav", ".flac", ".aiff"}
 
 
 def _convert_to_wav(audio_bytes: bytes, ext: str) -> bytes:
-    """Convert non-native audio formats to WAV using pydub.
-    Requires ffmpeg on system PATH for webm/ogg/mp3 decoding.
+    """Convert non-native audio formats to WAV using ffmpeg subprocess.
+    Uses the ffmpeg binary from imageio-ffmpeg (configured in backend/__init__.py).
+    No pydub or ffprobe dependency.
     """
-    from pydub import AudioSegment
-
-    ext_to_format = {
-        ".webm": "webm",
-        ".ogg":  "ogg",
-        ".mp3":  "mp3",
-        ".flac": "flac",
-        ".wav":  "wav",
-    }
-    fmt = ext_to_format.get(ext, "webm")
-    audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
-    # Export as 16-bit mono WAV (optimal for speech recognition)
-    audio_segment = audio_segment.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-    wav_buffer = io.BytesIO()
-    audio_segment.export(wav_buffer, format="wav")
-    return wav_buffer.getvalue()
+    from backend import convert_audio_to_wav
+    return convert_audio_to_wav(audio_bytes, ext)
 
 
-def _do_transcribe(audio_bytes: bytes, ext: str) -> str:
+# Language codes for Google Speech Recognition
+LANGUAGE_CODES = {
+    "en": "en-US",
+    "hi": "hi-IN",
+    "ta": "ta-IN",
+}
+
+
+def _do_transcribe(audio_bytes: bytes, ext: str, language: str = "en") -> str:
     """Write audio to a temp file, run SpeechRecognition, return transcript text.
     This is synchronous and must be called from a thread executor.
     Non-native formats are converted to WAV via pydub before recognition.
+    Supports language parameter: 'en', 'hi' (Hindi), 'ta' (Tamil).
     """
     tmp_path = None
+    lang_code = LANGUAGE_CODES.get(language, "en-US")
     try:
         # Convert to WAV if not a natively supported format
         if ext not in _NATIVE_FORMATS:
@@ -101,11 +100,11 @@ def _do_transcribe(audio_bytes: bytes, ext: str) -> str:
         with sr.AudioFile(tmp_path) as source:
             audio_data = _recognizer.record(source)
 
-        # Use Google's free speech recognition (no API key needed)
-        text = _recognizer.recognize_google(audio_data)
+        # Use Google's free speech recognition with language support
+        text = _recognizer.recognize_google(audio_data, language=lang_code)
         text = text.strip() if text else ""
         if text:
-            print(f"[Relay] Transcribed ({ext}): {len(text)} chars")
+            print(f"[Relay] Transcribed ({ext}, lang={lang_code}): {len(text)} chars")
         return text
 
     except sr.UnknownValueError:
@@ -119,24 +118,24 @@ def _do_transcribe(audio_bytes: bytes, ext: str) -> str:
             os.unlink(tmp_path)
 
 
-def _transcribe_fast(audio_bytes: bytes, preferred_ext: str) -> str:
+def _transcribe_fast(audio_bytes: bytes, preferred_ext: str, language: str = "en") -> str:
     """Fast single-pass transcription for live partials.
     No retries — keeps latency minimal."""
     try:
-        return _do_transcribe(audio_bytes, preferred_ext)
+        return _do_transcribe(audio_bytes, preferred_ext, language)
     except Exception as e:
         print(f"[Relay] Fast transcription failed ({preferred_ext}): {e}")
         return ""
 
 
-def _transcribe_with_retries(audio_bytes: bytes, preferred_ext: str) -> str:
+def _transcribe_with_retries(audio_bytes: bytes, preferred_ext: str, language: str = "en") -> str:
     """Retry strategy for final transcription (max 2 passes):
        1. Detected extension (converted to WAV if needed)
        2. Direct WAV re-encoding with different parameters
     """
     # Pass 1: detected container format
     try:
-        text = _do_transcribe(audio_bytes, preferred_ext)
+        text = _do_transcribe(audio_bytes, preferred_ext, language)
         if text:
             return text
     except Exception as e:
@@ -146,7 +145,7 @@ def _transcribe_with_retries(audio_bytes: bytes, preferred_ext: str) -> str:
     if preferred_ext != ".wav":
         try:
             wav_bytes = _convert_to_wav(audio_bytes, preferred_ext)
-            text = _do_transcribe(wav_bytes, ".wav")
+            text = _do_transcribe(wav_bytes, ".wav", language)
             if text:
                 print(f"[Relay] Transcription succeeded with WAV re-encoding fallback")
                 return text
@@ -156,7 +155,7 @@ def _transcribe_with_retries(audio_bytes: bytes, preferred_ext: str) -> str:
     return ""
 
 
-async def transcribe_buffer(audio_data: bytes) -> str | None:
+async def transcribe_buffer(audio_data: bytes, language: str = "en") -> str | None:
     """Transcribe raw audio bytes for live partial display.
     Uses single-pass fast path (no retries) on a dedicated executor
     so it never blocks the final transcription.
@@ -167,7 +166,7 @@ async def transcribe_buffer(audio_data: bytes) -> str | None:
     ext = _MIME_TO_EXT.get(mime, ".webm")
     try:
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(_executor_partial, _transcribe_fast, audio_data, ext)
+        text = await loop.run_in_executor(_executor_partial, _transcribe_fast, audio_data, ext, language)
         return text or None
     except Exception as e:
         print(f"[Relay] Partial transcription failed: {e}")
@@ -182,12 +181,13 @@ class RelayAgent:
         """Accumulate raw binary audio chunks from the browser."""
         self.audio_buffer.extend(chunk)
 
-    async def transcribe_full(self) -> str:
+    async def transcribe_full(self, language: str = "en") -> str:
         """
         Transcribe the full accumulated audio via SpeechRecognition.
         Returns plain-text transcript.
         Returns empty string if audio is too small or transcription fails.
         Buffer is cleared after transcription.
+        Supports language parameter: 'en', 'hi' (Hindi), 'ta' (Tamil).
         """
         buf = bytes(self.audio_buffer)
         self.audio_buffer.clear()
@@ -198,11 +198,12 @@ class RelayAgent:
 
         mime = _detect_mime(buf)
         ext = _MIME_TO_EXT.get(mime, ".webm")
-        print(f"[RelayAgent] Transcribing {len(buf)} bytes | detected={mime} ext={ext} | header={buf[:8].hex()}")
+        lang_code = LANGUAGE_CODES.get(language, "en-US")
+        print(f"[RelayAgent] Transcribing {len(buf)} bytes | detected={mime} ext={ext} | lang={lang_code} | header={buf[:8].hex()}")
 
         try:
             loop = asyncio.get_event_loop()
-            text = await loop.run_in_executor(_executor_final, _transcribe_with_retries, buf, ext)
+            text = await loop.run_in_executor(_executor_final, _transcribe_with_retries, buf, ext, language)
             if text:
                 print(f"[RelayAgent] Transcribed {len(buf)} bytes → {len(text)} chars of real audio")
                 return text

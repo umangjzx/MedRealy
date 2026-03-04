@@ -6,6 +6,8 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 
 const STAGE_LABELS = {
   listening:    "Listening — recording in progress",
+  saving:       "Saving audio recording locally…",
+  saved:        "Audio saved — starting transcription",
   transcribing: "Transcribing audio…",
   extracting:   "Extracting SBAR data from transcript…",
   sentinel:     "Running risk checks…",

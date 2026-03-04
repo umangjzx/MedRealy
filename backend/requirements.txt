@@ -16,3 +16,8 @@ openpyxl
 python-multipart
 pyjwt
 bcrypt
+reportlab
+langgraph
+google-generativeai
+langchain-core
+imageio-ffmpeg

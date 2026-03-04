@@ -7,6 +7,7 @@ Strategy: Multiple focused QA-style prompts (flan-t5 excels at these).
 """
 
 import re
+import asyncio
 from backend.models import (
     SBARData, PatientInfo, Situation, Background,
     Assessment, Recommendation, Vitals,
@@ -76,7 +77,12 @@ class HFExtractAgent:
     """Extract SBAR structured data using focused QA-style prompts to Flan-T5."""
 
     async def extract(self, transcript: str) -> SBARData:
-        """Run the Flan-T5 model to extract SBAR fields from the transcript."""
+        """Run the Flan-T5 model (in a thread) to extract SBAR fields."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._extract_sync, transcript)
+
+    def _extract_sync(self, transcript: str) -> SBARData:
+        """Sync implementation of extraction logic."""
         try:
             model, tokenizer = _load_model()
             t = transcript[:2000]  # truncate to fit context

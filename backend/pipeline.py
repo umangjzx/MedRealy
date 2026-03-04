@@ -7,14 +7,26 @@ Falls back to rich hardcoded demo data when Claude/OpenAI API keys are unavailab
 
 import traceback
 from datetime import datetime
+from typing import TypedDict, List, Optional
+from langgraph.graph import StateGraph, START, END
 from backend.agents.relay_agent import RelayAgent
 from backend.agents.extract_agent import ExtractAgent
 from backend.agents.sentinel_agent import SentinelAgent
 from backend.agents.bridge_agent import BridgeAgent
+from backend.agents.compliance_agent import ComplianceAgent
+from backend.agents.pharma_agent import PharmaAgent
+from backend.agents.trend_agent import TrendAgent
+from backend.agents.educator_agent import EducatorAgent
+from backend.agents.debrief_agent import DebriefAgent
+from backend.agents.billing_agent import BillingAgent
+from backend.agents.literature_agent import LiteratureAgent
+from backend.database import get_history_for_trends
 from backend.constants import DEMO_TRANSCRIPT
 from backend.models import (
     FinalReport, SBARData, PatientInfo, Situation, Background,
     Assessment, Recommendation, Vitals, RiskAlert,
+    ComplianceReport, PharmaReport, TrendReport, VitalTrend, EducatorReport, DebriefReport,
+    BillingReport, LiteratureReport
 )
 
 
@@ -317,121 +329,384 @@ Vitals: {vitals_str}
     return header + situation + assessment + alerts_section + transcript_section
 
 
+def _demo_trend_report() -> TrendReport:
+    """Rich visual trend data for demo/fallback."""
+    return TrendReport(
+        patient_mrn="ICU-2024-0447",
+        handoffs_analysed=3,
+        deterioration_risk="HIGH",
+        trajectory_summary="Patient deteriorating over last 24h: worsening hypotension and persistent tachycardia despite fluid resuscitation.",
+        vital_trends=[
+            VitalTrend(vital_name="MAP (Mean Arterial Pressure)", direction="worsening", interpretation="Progressive hypotension (65 -> 60 -> 58 mmHg) despite Norepinephrine increase."),
+            VitalTrend(vital_name="Heart Rate", direction="stable", interpretation="Persistently elevated (110-120 bpm range) consistent with septic shock state."),
+            VitalTrend(vital_name="Lactate", direction="worsening", interpretation="Rising (2.1 -> 3.4 -> 4.2 mmol/L) indicating deepening tissue hypoperfusion.")
+        ]
+    )
+
+
+class HandoffState(TypedDict):
+    audio_chunks: List[bytes]
+    outgoing_nurse: str
+    incoming_nurse: str
+    is_demo: bool
+    language: str
+    transcript: Optional[str]
+    sbar: Optional[SBARData]
+    alerts: List[RiskAlert]
+    compliance: Optional[ComplianceReport]
+    pharma: Optional[PharmaReport]
+    trend: Optional[TrendReport]
+    educator: Optional[EducatorReport]
+    debrief: Optional[DebriefReport]
+    billing: Optional[BillingReport]
+    literature: Optional[LiteratureReport]
+    final_report: Optional[FinalReport]
+
+
 class HandoffPipeline:
     def __init__(self):
         self.extract = ExtractAgent()
         self.sentinel = SentinelAgent()
         self.bridge = BridgeAgent()
+        self.compliance = ComplianceAgent()
+        self.pharma = PharmaAgent()
+        self.trend = TrendAgent()
+        self.educator = EducatorAgent()
+        self.debrief = DebriefAgent()
+        self.billing = BillingAgent()
+        self.literature = LiteratureAgent()
 
-    async def run(self, audio_chunks: list, outgoing: str, incoming: str) -> FinalReport:
-        """Full pipeline: transcribe audio -> extract SBAR -> check risks -> generate report."""
-        # Create a fresh RelayAgent per-run to avoid buffer leaks between sessions
+        # Build LangGraph workflow
+        workflow = StateGraph(HandoffState)
+
+        workflow.add_node("transcribe", self._transcribe_node)
+        workflow.add_node("extract", self._extract_node)
+        workflow.add_node("sentinel", self._sentinel_node)
+        
+        # Parallel agents
+        workflow.add_node("compliance", self._compliance_node)
+        workflow.add_node("pharma", self._pharma_node)
+        workflow.add_node("trend", self._trend_node)
+        workflow.add_node("educator", self._educator_node)
+        workflow.add_node("debrief", self._debrief_node)
+        workflow.add_node("billing", self._billing_node)
+        workflow.add_node("literature", self._literature_node)
+        
+        # Aggregation
+        workflow.add_node("bridge", self._bridge_node)
+
+        # Edges
+        workflow.add_edge(START, "transcribe")
+        workflow.add_edge("transcribe", "extract")
+        workflow.add_edge("extract", "sentinel")
+        
+        # Parallel execution
+        workflow.add_edge("sentinel", "compliance")
+        workflow.add_edge("sentinel", "pharma")
+        workflow.add_edge("sentinel", "trend")
+        workflow.add_edge("sentinel", "educator")
+        workflow.add_edge("sentinel", "debrief")
+        workflow.add_edge("sentinel", "billing")
+        workflow.add_edge("sentinel", "literature")
+        
+        # Fan-in
+        workflow.add_edge("compliance", "bridge")
+        workflow.add_edge("pharma", "bridge")
+        workflow.add_edge("trend", "bridge")
+        workflow.add_edge("educator", "bridge")
+        workflow.add_edge("debrief", "bridge")
+        workflow.add_edge("billing", "bridge")
+        workflow.add_edge("literature", "bridge")
+        
+        workflow.add_edge("bridge", END)
+
+        self.app = workflow.compile()
+
+    # ── Nodes ─────────────────────────────────────────────────────────────────
+
+    async def _transcribe_node(self, state: HandoffState):
+        # 1. Check if transcript already provided (e.g. wrapper or demo)
+        t = state.get("transcript")
+        if t is not None:
+            return {"transcript": t}
+        
+        # 2. Check for demo mode without transcript (should rely on downstream default, but safe to set empty)
+        if state.get("is_demo"):
+            return {"transcript": DEMO_TRANSCRIPT}
+
+        # 3. Process audio chunks
+        chunks = state.get("audio_chunks", [])
+        if not chunks:
+            return {"transcript": ""}
+
+        language = state.get("language", "en")
         relay = RelayAgent()
-        for chunk in audio_chunks:
+        for chunk in chunks:
             await relay.process_audio_chunk(chunk)
-        transcript = await relay.transcribe_full()
-        return await self._run_from_transcript(transcript, outgoing, incoming)
+        new_transcript = await relay.transcribe_full(language=language)
+        return {"transcript": new_transcript}
 
-    async def run_demo(self, outgoing: str, incoming: str) -> FinalReport:
-        """Demo pipeline: skip audio capture, use the pre-written demo transcript."""
-        return await self._run_from_transcript(DEMO_TRANSCRIPT, outgoing, incoming, is_demo=True)
-
-    async def run_from_transcript(self, transcript: str, outgoing: str, incoming: str) -> FinalReport:
-        """Public API: run pipeline from an already-transcribed text (used by WebSocket live flow)."""
-        return await self._run_from_transcript(transcript, outgoing, incoming)
-
-    async def _run_from_transcript(
-        self, transcript: str, outgoing: str, incoming: str, is_demo: bool = False
-    ) -> FinalReport:
-        """Shared logic: Extract -> Sentinel -> Bridge. Falls back to demo data if AI unavailable."""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Guardrail: in real mode, never auto-inject demo content when transcript is missing.
-        if not is_demo:
-            text = (transcript or "").strip()
-            if not text or text == DEMO_TRANSCRIPT.strip():
-                return FinalReport(
+    async def _extract_node(self, state: HandoffState):
+        transcript = state.get("transcript") or ""
+        is_demo = state.get("is_demo", False)
+        
+        # Early exit check for empty/missing transcript in non-demo mode
+        if not is_demo and (not transcript or not transcript.strip()):
+            # Return empty/error state to flow through
+            # In a real graph we might branch here, but linear flow works if downstream handles empty
+            return {
+                "sbar": SBARData(),
+                "alerts": [RiskAlert(severity="LOW", category="missing", description="No transcript captured.")],
+                "final_report": FinalReport(
                     sbar=SBARData(),
-                    alerts=[
-                        RiskAlert(
-                            severity="LOW",
-                            category="missing",
-                            description="No transcript captured from live audio. Clinical handoff content unavailable.",
-                        )
-                    ],
-                    outgoing_nurse=outgoing,
-                    incoming_nurse=incoming,
-                    timestamp=timestamp,
-                    rendered=_missing_transcript_rendered(outgoing, incoming),
-                    is_demo=False,
+                    alerts=[],
+                    outgoing_nurse=state["outgoing_nurse"],
+                    incoming_nurse=state["incoming_nurse"],
+                    timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    rendered=_missing_transcript_rendered(state["outgoing_nurse"], state["incoming_nurse"]),
+                    is_demo=False
                 )
+            }
 
+        sbar = SBARData()
         try:
             sbar = await self.extract.extract(transcript)
         except Exception as e:
-            print(f"[Pipeline] Extract failed: {traceback.format_exc()}")
-            sbar = SBARData()
+            print(f"[Graph] Extract failed: {e}")
 
-        # If ExtractAgent returned empty data (Claude + HF both failed), fall back
-        # but still use the REAL transcript if we have one
+        # Fallback Logic
         using_real_transcript = transcript and transcript.strip() != DEMO_TRANSCRIPT.strip()
-
+        
         if _sbar_is_empty(sbar):
             if is_demo:
-                print("[Pipeline] Demo mode active — using hardcoded demo data")
-                sbar = _demo_sbar()
-                alerts = _demo_alerts()
-                rendered = _demo_rendered(outgoing, incoming)
+                print("[Graph] Demo fallback")
+                return {
+                    "sbar": _demo_sbar(), 
+                    "alerts": _demo_alerts(),
+                    "transcript": DEMO_TRANSCRIPT 
+                }
             elif using_real_transcript:
-                # Last resort: regex-based extraction from raw transcript
-                print(f"[Pipeline] AI extraction failed — using regex fallback on real transcript ({len(transcript)} chars)")
+                print("[Graph] Regex fallback")
                 sbar = _sbar_from_transcript(transcript)
                 alerts = _alerts_from_sbar(sbar)
-                rendered = _rendered_from_real(sbar, alerts, outgoing, incoming, transcript)
+                return {"sbar": sbar, "alerts": alerts}
             else:
-                print("[Pipeline] No transcript available in real mode — returning non-demo missing-transcript report")
-                sbar = SBARData()
-                alerts = [
-                    RiskAlert(
-                        severity="LOW",
-                        category="missing",
-                        description="No transcript captured from live audio. Clinical handoff content unavailable.",
-                    )
-                ]
-                rendered = _missing_transcript_rendered(outgoing, incoming)
-            return FinalReport(
-                sbar=sbar,
-                alerts=alerts,
-                outgoing_nurse=outgoing,
-                incoming_nurse=incoming,
-                timestamp=timestamp,
-                rendered=rendered,
-                is_demo=is_demo,
-            )
+                # Completely failed
+                return {
+                    "sbar": SBARData(), 
+                    "alerts": [RiskAlert(severity="LOW", category="missing", description="No transcript captured.")]
+                }
+        
+        return {"sbar": sbar}
 
+    async def _sentinel_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        # If alerts already populated (e.g. via fallback), return existing or merge
+        # But usually sentinel adds value. If sbar is empty, return empty.
+        if not sbar or _sbar_is_empty(sbar):
+            return {"alerts": state.get("alerts", [])}
+        
         try:
             alerts = await self.sentinel.check(sbar)
-        except Exception as e:
-            print(f"[Pipeline] Sentinel failed: {traceback.format_exc()}")
-            alerts = _demo_alerts() if is_demo else []
+            
+            # Calculate Risk Score (Mindblowing Feature)
+            try:
+                # If ExtractAgent didn't populate it (or we want to ensure it's calculated)
+                if not sbar.risk_score or sbar.risk_score.score == 0:
+                   sbar.risk_score = self.sentinel.calculate_raw_score(sbar, alerts)
+            except Exception as e:
+                print(f"[Sentinel] Score calc failed: {e}")
+
+            return {"alerts": alerts, "sbar": sbar}
+        except Exception:
+            return {"alerts": state.get("alerts", [])}
+
+    async def _compliance_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        transcript = state.get("transcript")
+        if not sbar or not transcript:
+             return {"compliance": ComplianceReport()}
+        try:
+            res = await self.compliance.audit(sbar, state.get("alerts", []), transcript)
+            return {"compliance": res}
+        except Exception:
+            return {"compliance": ComplianceReport()}
+
+    async def _pharma_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        if not sbar:
+            return {"pharma": PharmaReport()}
+        try:
+            res = await self.pharma.analyse(sbar)
+            return {"pharma": res}
+        except Exception:
+            return {"pharma": PharmaReport()}
+
+    async def _trend_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        try:
+            if state.get("is_demo"):
+                return {"trend": _demo_trend_report()}
+            
+            if not sbar or not sbar.patient:
+                return {"trend": TrendReport()}
+
+            history = await get_history_for_trends(sbar.patient.mrn or "", sbar.patient.name or "")
+            res = await self.trend.analyse(sbar, history)
+            return {"trend": res}
+        except Exception:
+            return {"trend": TrendReport()}
+
+    async def _educator_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        transcript = state.get("transcript")
+        if not sbar or not transcript:
+             return {"educator": EducatorReport()}
+        try:
+            res = await self.educator.educate(sbar, transcript)
+            return {"educator": res}
+        except Exception:
+            return {"educator": EducatorReport()}
+    
+    async def _debrief_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        transcript = state.get("transcript")
+        if not sbar or not transcript:
+            return {"debrief": DebriefReport()}
+        try:
+            res = await self.debrief.evaluate(sbar, state.get("alerts", []), transcript)
+            return {"debrief": res}
+        except Exception:
+            return {"debrief": DebriefReport()}
+            
+    async def _billing_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        if not sbar:
+             return {"billing": BillingReport()}
+        try:
+            res = await self.billing.analyse(sbar)
+            return {"billing": res}
+        except Exception:
+            return {"billing": BillingReport()}
+
+    async def _literature_node(self, state: HandoffState):
+        sbar = state.get("sbar")
+        if not sbar:
+             return {"literature": LiteratureReport(topic="N/A")}
+        try:
+            res = await self.literature.fetch_evidence(sbar)
+            return {"literature": res}
+        except Exception:
+            return {"literature": LiteratureReport(topic="N/A")}
+
+    async def _bridge_node(self, state: HandoffState):
+        # If final_report was pre-calculated (e.g. error state in extract), keep it
+        if state.get("final_report"):
+            return {}
+
+        outgoing = state["outgoing_nurse"]
+        incoming = state["incoming_nurse"]
+        is_demo = state.get("is_demo", False)
+        sbar = state.get("sbar") or SBARData()
+        alerts = state.get("alerts") or []
 
         try:
-            final_report = await self.bridge.generate(sbar, alerts, outgoing, incoming)
-        except Exception as e:
-            print(f"[Pipeline] Bridge failed: {traceback.format_exc()}")
-            final_report = FinalReport(
-                sbar=sbar,
-                alerts=alerts,
-                outgoing_nurse=outgoing,
-                incoming_nurse=incoming,
-                timestamp=timestamp,
+            final = await self.bridge.generate(sbar, alerts, outgoing, incoming)
+            # Attach extras
+            final.compliance = state.get("compliance")
+            final.pharma = state.get("pharma")
+            final.trend = state.get("trend")
+            final.educator = state.get("educator")
+            final.debrief = state.get("debrief")
+            final.billing = state.get("billing")
+            final.literature = state.get("literature")
+        except Exception:
+            final = FinalReport(
+                sbar=sbar, alerts=alerts, outgoing_nurse=outgoing, incoming_nurse=incoming,
+                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 rendered=_demo_rendered(outgoing, incoming) if is_demo else "",
                 is_demo=is_demo,
+                compliance=state.get("compliance"),
+                pharma=state.get("pharma"),
+                trend=state.get("trend"),
+                educator=state.get("educator"),
+                debrief=state.get("debrief"),
+                billing=state.get("billing"),
+                literature=state.get("literature")
             )
+        
+        # Fallback render if bridge failed
+        if not final.rendered:
+             final.rendered = _demo_rendered(outgoing, incoming) if is_demo else ""
 
-        # If bridge also failed to produce rendered report, fill fallback
-        if not final_report.rendered:
-            final_report.rendered = _demo_rendered(outgoing, incoming) if is_demo else ""
+        final.is_demo = is_demo
+        return {"final_report": final}
 
-        final_report.is_demo = is_demo
-        return final_report
+    # ── Entry Points ──────────────────────────────────────────────────────────
+
+    async def run(self, audio_chunks: list, outgoing: str, incoming: str, language: str = "en") -> FinalReport:
+        input_state: HandoffState = {
+            "audio_chunks": audio_chunks,
+            "outgoing_nurse": outgoing,
+            "incoming_nurse": incoming,
+            "is_demo": False,
+            "language": language,
+            "transcript": None,
+            "sbar": None,
+            "alerts": [],
+            "final_report": None,
+            "compliance": None,
+            "pharma": None,
+            "trend": None,
+            "educator": None,
+            "debrief": None,
+            "billing": None,
+            "literature": None,
+        }
+        result = await self.app.ainvoke(input_state)
+        return result["final_report"]
+
+    async def run_demo(self, outgoing: str, incoming: str) -> FinalReport:
+        input_state: HandoffState = {
+            "audio_chunks": [],
+            "outgoing_nurse": outgoing,
+            "incoming_nurse": incoming,
+            "is_demo": True,
+            "language": "en",
+            "transcript": DEMO_TRANSCRIPT,
+            "sbar": None,
+            "alerts": [],
+            "final_report": None,
+            "compliance": None,
+            "pharma": None,
+            "trend": None,
+            "educator": None,
+            "debrief": None,
+            "billing": None,
+            "literature": None,
+        }
+        result = await self.app.ainvoke(input_state)
+        return result["final_report"]
+    
+    async def run_from_transcript(self, transcript: str, outgoing: str, incoming: str) -> FinalReport:
+        # For websocket live flow
+        input_state: HandoffState = {
+            "audio_chunks": [],
+            "outgoing_nurse": outgoing,
+            "incoming_nurse": incoming,
+            "is_demo": False,
+            "language": "en",
+            "transcript": transcript,
+            "sbar": None,
+            "alerts": [],
+            "final_report": None,
+            "compliance": None,
+            "pharma": None,
+            "trend": None,
+            "educator": None,
+            "debrief": None,
+            "billing": None,
+            "literature": None,
+        }
+        result = await self.app.ainvoke(input_state)
+        return result["final_report"]

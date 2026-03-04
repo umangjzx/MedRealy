@@ -1,0 +1,15 @@
+{
+  "recording_id": "d693b09b-ccb4-40b7-be1c-a4e848e1a880",
+  "original_format": "audio/webm",
+  "original_ext": ".webm",
+  "original_size_bytes": 64900,
+  "wav_size_bytes": 0,
+  "duration_estimate_sec": 4.1,
+  "saved_at": "2026-03-04T16:41:34.857599",
+  "raw_path": "C:\\Users\\UMANG JAISWAL N\\OneDrive\\Desktop\\MedRelay\\recordings\\d693b09b-ccb4-40b7-be1c-a4e848e1a880.webm",
+  "wav_path": null,
+  "outgoing_nurse": "hello",
+  "incoming_nurse": "hii",
+  "session_id": null,
+  "chunk_count": 2
+}

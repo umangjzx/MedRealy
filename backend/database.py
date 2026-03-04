@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
     username    TEXT    UNIQUE NOT NULL,
     display_name TEXT   DEFAULT '',
     role        TEXT    DEFAULT 'nurse',
+    shift_status TEXT   DEFAULT 'active',  -- 'active', 'absent', 'break', 'on_call'
     pin_hash    TEXT    NOT NULL,
     is_active   INTEGER DEFAULT 1,
     created_at  TEXT    NOT NULL,
@@ -87,11 +88,64 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_by  TEXT    DEFAULT 'system'
 );
 
+-- ── Nurse Scheduling ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS patients_registry (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_id      TEXT    UNIQUE NOT NULL,
+    name            TEXT    NOT NULL,
+    mrn             TEXT    DEFAULT '',
+    room            TEXT    DEFAULT '',
+    bed             TEXT    DEFAULT '',
+    acuity          INTEGER DEFAULT 3 CHECK(acuity BETWEEN 1 AND 5),
+    diagnosis       TEXT    DEFAULT '',
+    admission_date  TEXT    NOT NULL,
+    discharge_date  TEXT    DEFAULT NULL,
+    status          TEXT    DEFAULT 'admitted',
+    notes           TEXT    DEFAULT '',
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id     TEXT    UNIQUE NOT NULL,
+    shift_date      TEXT    NOT NULL,
+    shift_type      TEXT    NOT NULL,
+    status          TEXT    DEFAULT 'draft',
+    created_by      TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL,
+    published_at    TEXT    DEFAULT NULL,
+    notes           TEXT    DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS schedule_assignments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id   TEXT    UNIQUE NOT NULL,
+    schedule_id     TEXT    NOT NULL,
+    nurse_user_id   TEXT    NOT NULL,
+    patient_id      TEXT    NOT NULL,
+    is_primary      INTEGER DEFAULT 1,
+    notes           TEXT    DEFAULT '',
+    handoff_status  TEXT    DEFAULT 'pending',
+    created_at      TEXT    NOT NULL,
+    FOREIGN KEY (schedule_id) REFERENCES schedules(schedule_id),
+    FOREIGN KEY (nurse_user_id) REFERENCES admin_users(user_id),
+    FOREIGN KEY (patient_id) REFERENCES patients_registry(patient_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_patient ON sessions(patient_name);
+CREATE INDEX IF NOT EXISTS idx_sessions_mrn ON sessions(patient_mrn);
 CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_refresh_user ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_hash ON refresh_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_patients_status ON patients_registry(status);
+CREATE INDEX IF NOT EXISTS idx_patients_mrn ON patients_registry(mrn);
+CREATE INDEX IF NOT EXISTS idx_schedules_date ON schedules(shift_date);
+CREATE INDEX IF NOT EXISTS idx_assignments_schedule ON schedule_assignments(schedule_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_nurse ON schedule_assignments(nurse_user_id);
 """
 
 async def init_db() -> None:
@@ -124,6 +178,23 @@ async def init_db() -> None:
             # Existing admin user should keep admin role
             await db.execute("UPDATE admin_users SET role = 'admin' WHERE username = 'admin'")
             await db.commit()
+
+        # ── Migrate schema: add new Agent columns ─────────────────────────
+        for col in ["compliance_json", "pharma_json", "trend_json", "educator_json", "debrief_json"]:
+            try:
+                await db.execute(f"SELECT {col} FROM sessions LIMIT 1")
+            except Exception:
+                await db.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT '{{}}'")
+                await db.commit()
+                print(f"[DB] Added column {col} to sessions table")
+
+        # ── Migrate schema: add handoff_status to schedule_assignments ────
+        try:
+            await db.execute("SELECT handoff_status FROM schedule_assignments LIMIT 1")
+        except Exception:
+            await db.execute("ALTER TABLE schedule_assignments ADD COLUMN handoff_status TEXT DEFAULT 'pending'")
+            await db.commit()
+            print("[DB] Added column handoff_status to schedule_assignments table")
 
         # ── Seed default admin user if none exists ────────────────────────
         cur = await db.execute("SELECT COUNT(*) FROM admin_users WHERE role='admin'")
@@ -185,6 +256,18 @@ async def save_session(final_report) -> str:
     medium = sum(1 for a in alerts if a.severity == "MEDIUM")
     low    = sum(1 for a in alerts if a.severity == "LOW")
 
+    # Serialize new agent outputs
+    def _to_json(obj):
+        return json.dumps(obj.model_dump()) if obj else "{}"
+
+    compliance_json = _to_json(getattr(final_report, "compliance", None))
+    pharma_json     = _to_json(getattr(final_report, "pharma", None))
+    trend_json      = _to_json(getattr(final_report, "trend", None))
+    educator_json   = _to_json(getattr(final_report, "educator", None))
+    debrief_json    = _to_json(getattr(final_report, "debrief", None))
+    billing_json    = _to_json(getattr(final_report, "billing", None))
+    literature_json = _to_json(getattr(final_report, "literature", None))
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
@@ -194,8 +277,9 @@ async def save_session(final_report) -> str:
                 diagnosis, sbar_json, alerts_json, rendered,
                 high_alert_count, medium_alert_count, low_alert_count,
                 signed_by_outgoing, signed_by_incoming,
-                timestamp, created_at, is_demo
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                timestamp, created_at, is_demo,
+                compliance_json, pharma_json, trend_json, educator_json, debrief_json, billing_json, literature_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 session_id,
@@ -215,6 +299,13 @@ async def save_session(final_report) -> str:
                 final_report.timestamp,
                 now,
                 int(final_report.is_demo),
+                compliance_json,
+                pharma_json,
+                trend_json,
+                educator_json,
+                debrief_json,
+                billing_json,
+                literature_json,
             ),
         )
         await db.commit()
@@ -284,6 +375,13 @@ async def get_session(session_id: str) -> dict | None:
         # Parse JSON fields back into Python objects
         d["sbar_json"]    = json.loads(d["sbar_json"])
         d["alerts_json"]  = json.loads(d["alerts_json"])
+        # New agents
+        d["compliance"]   = json.loads(d.get("compliance_json") or "{}")
+        d["pharma"]       = json.loads(d.get("pharma_json") or "{}")
+        d["trend"]        = json.loads(d.get("trend_json") or "{}")
+        d["educator"]     = json.loads(d.get("educator_json") or "{}")
+        d["debrief"]      = json.loads(d.get("debrief_json") or "{}")
+
         # Normalize SQLite integers to booleans
         d["signed_by_outgoing"] = bool(d["signed_by_outgoing"])
         d["signed_by_incoming"] = bool(d["signed_by_incoming"])
@@ -376,6 +474,72 @@ async def get_analytics() -> dict:
         patients_row = await cur.fetchone()
         patients_count = patients_row["count"] if patients_row else 0
 
+        # Detailed Handoff Metrics (Quality, Efficiency, Risk)
+        # Fetching bulk sessions to compute advanced metrics in Python
+        cur = await db.execute("""
+            SELECT alerts_json, debrief_json, timestamp
+            FROM sessions
+            ORDER BY created_at DESC
+            LIMIT 100
+        """)
+        recent_rows = await cur.fetchall()
+
+        daily_quality = {}   # {YYYY-MM-DD: [scores]}
+        daily_words = {}     # {YYYY-MM-DD: [word_counts]} (efficiency proxy)
+        risk_heatmap = {}    # {alert_description: count}
+
+        for row in recent_rows:
+            try:
+                ts_str = row["timestamp"][:10]  # YYYY-MM-DD
+                
+                # Risk Heatmap
+                try:
+                    alerts = json.loads(row["alerts_json"])
+                    for a in alerts:
+                        if isinstance(a, dict) and a.get("severity") == "HIGH":
+                            desc = a.get("description", "").split("—")[0].strip()
+                            risk_heatmap[desc] = risk_heatmap.get(desc, 0) + 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+                # Quality & Efficiency Trends
+                try:
+                    debrief = json.loads(row["debrief_json"])
+                    if isinstance(debrief, dict):
+                        # Quality (Overall Score)
+                        score = debrief.get("overall_score", 0)
+                        if score > 0:
+                            daily_quality.setdefault(ts_str, []).append(score)
+                        
+                        # Efficiency (via Clarity/Efficiency scorecard logic or raw word count from structure)
+                        # We don't have raw word count in debrief_json top-level, 
+                        # but we can infer from "Efficiency" scorecard if available
+                        scorecards = debrief.get("scorecards", [])
+                        for sc in scorecards:
+                            if sc.get("category") == "Efficiency":
+                                # Extract word count from finding string if possible? 
+                                # Finding: "X words — optimal range..."
+                                # Too brittle. Let's just use the efficiency score (0-10)
+                                eff_score = sc.get("score", 0)
+                                daily_words.setdefault(ts_str, []).append(eff_score)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            except Exception:
+                continue
+
+        # Aggregate Trends
+        quality_trend = [
+            {"day": day, "avg_score": round(sum(scores)/len(scores), 1)}
+            for day, scores in sorted(daily_quality.items())
+        ]
+        efficiency_trend = [
+            {"day": day, "avg_score": round(sum(sc)/len(sc), 1)}
+            for day, sc in sorted(daily_words.items())
+        ]
+        risk_top_5 = sorted(risk_heatmap.items(), key=lambda x: x[1], reverse=True)[:5]
+        risk_heatmap_list = [{"alert": k, "count": v} for k, v in risk_top_5]
+
         return {
             "daily_sessions": daily,
             "severity_distribution": severity,
@@ -383,8 +547,38 @@ async def get_analytics() -> dict:
             "hourly_distribution": hourly,
             "top_diagnoses": diagnoses,
             "unique_patients": patients_count,
+            "quality_trend": quality_trend,
+            "efficiency_trend": efficiency_trend,
+            "risk_heatmap": risk_heatmap_list,
         }
 
+
+async def get_recent_critical_alerts(limit: int = 5) -> list[dict]:
+    """Get the most recent ALERT json snippets where severity=HIGH."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("""
+            SELECT session_id, alerts_json, timestamp, patient_name 
+            FROM sessions 
+            WHERE high_alert_count > 0 
+            ORDER BY timestamp DESC LIMIT ?
+        """, (limit,))
+        rows = await cur.fetchall()
+        
+        results = []
+        for r in rows:
+            try:
+                alerts = json.loads(r["alerts_json"])
+                # Filter just the high ones
+                highs = [a for a in alerts if a.get("severity") == "HIGH"]
+                results.append({
+                    "session_id": r["session_id"],
+                    "timestamp": r["timestamp"],
+                    "patient": r["patient_name"],
+                    "alerts": highs
+                })
+            except Exception: pass
+        return results
 
 async def get_patient_timeline(patient_name: str) -> list[dict]:
     """Get all sessions for a specific patient, ordered chronologically."""
@@ -482,7 +676,7 @@ async def get_admin_users() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT user_id, username, display_name, role, is_active, created_at, last_login FROM admin_users ORDER BY created_at ASC"
+            "SELECT user_id, username, display_name, role, is_active, created_at, last_login, shift_status FROM admin_users ORDER BY created_at ASC"
         )
         rows = await cur.fetchall()
         return [dict(r) | {"is_active": bool(dict(r)["is_active"])} for r in rows]
@@ -502,10 +696,10 @@ async def create_admin_user(username: str, display_name: str, role: str, passwor
 
 
 async def update_admin_user(user_id: str, **kwargs) -> bool:
-    """Update admin user fields. Supports: display_name, role, is_active, password."""
+    """Update admin user fields. Supports: display_name, role, is_active, password, shift_status."""
     sets = []
     vals = []
-    for key in ("display_name", "role", "is_active"):
+    for key in ("display_name", "role", "is_active", "shift_status"):
         if key in kwargs:
             sets.append(f"{key} = ?")
             vals.append(int(kwargs[key]) if key == "is_active" else kwargs[key])
@@ -882,3 +1076,449 @@ async def get_quality_analytics() -> dict:
             "completeness": completeness,
             "weekly_quality": weekly_quality,
         }
+
+
+async def get_history_for_trends(mrn: str | None, name: str | None, limit: int = 5) -> list[dict]:
+    """Retrieve the most recent handoff sessions for a patient to analyze trends."""
+    if not mrn and not name:
+        return []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sql = """
+            SELECT sbar_json, timestamp, alerts_json
+            FROM sessions
+            WHERE (patient_mrn = ? AND patient_mrn != '')
+               OR (patient_name = ? AND patient_name != '')
+            ORDER BY id DESC
+            LIMIT ?
+        """
+        cursor = await db.execute(sql, (mrn or '', name or '', limit))
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  NURSE SCHEDULING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Patients Registry ────────────────────────────────────────────────────────
+
+async def create_patient(name: str, mrn: str = "", room: str = "", bed: str = "",
+                         acuity: int = 3, diagnosis: str = "", notes: str = "",
+                         admission_date: str | None = None) -> dict:
+    """Register a new patient in the hospital."""
+    patient_id = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    admission = admission_date or now
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO patients_registry
+               (patient_id, name, mrn, room, bed, acuity, diagnosis, admission_date, notes, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (patient_id, name, mrn, room, bed, acuity, diagnosis, admission, notes, "admitted", now, now),
+        )
+        await conn.commit()
+    return {"patient_id": patient_id, "name": name, "mrn": mrn, "room": room, "bed": bed,
+            "acuity": acuity, "diagnosis": diagnosis, "admission_date": admission,
+            "status": "admitted", "notes": notes, "created_at": now}
+
+
+async def update_patient(patient_id: str, **kwargs) -> bool:
+    """Update patient fields: name, mrn, room, bed, acuity, diagnosis, status, notes, discharge_date."""
+    allowed = {"name", "mrn", "room", "bed", "acuity", "diagnosis", "status", "notes", "discharge_date"}
+    sets, vals = [], []
+    for k, v in kwargs.items():
+        if k in allowed and v is not None:
+            sets.append(f"{k} = ?")
+            vals.append(v)
+    if not sets:
+        return False
+    sets.append("updated_at = ?")
+    vals.append(datetime.now().isoformat())
+    vals.append(patient_id)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(f"UPDATE patients_registry SET {', '.join(sets)} WHERE patient_id = ?", vals)
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def delete_patient(patient_id: str) -> bool:
+    """Remove a patient from the registry."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute("DELETE FROM patients_registry WHERE patient_id = ?", (patient_id,))
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def get_patients_registry(status: str | None = None) -> list[dict]:
+    """Get all patients, optionally filtered by status."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        if status:
+            cur = await conn.execute(
+                "SELECT * FROM patients_registry WHERE status = ? ORDER BY room, bed, name", (status,))
+        else:
+            cur = await conn.execute("SELECT * FROM patients_registry ORDER BY room, bed, name")
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_patient_by_id(patient_id: str) -> dict | None:
+    """Look up a single patient."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM patients_registry WHERE patient_id = ?", (patient_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+# ─── Schedules ────────────────────────────────────────────────────────────────
+
+async def create_schedule(shift_date: str, shift_type: str, created_by: str, notes: str = "") -> dict:
+    """Create a new schedule draft."""
+    schedule_id = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO schedules (schedule_id, shift_date, shift_type, status, created_by, created_at, updated_at, notes)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (schedule_id, shift_date, shift_type, "draft", created_by, now, now, notes),
+        )
+        await conn.commit()
+    return {"schedule_id": schedule_id, "shift_date": shift_date, "shift_type": shift_type,
+            "status": "draft", "created_by": created_by, "created_at": now, "notes": notes}
+
+
+async def get_schedules(shift_date: str | None = None, status: str | None = None) -> list[dict]:
+    """List schedules with optional date/status filter."""
+    clauses, vals = [], []
+    if shift_date:
+        clauses.append("shift_date = ?")
+        vals.append(shift_date)
+    if status:
+        clauses.append("status = ?")
+        vals.append(status)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(f"""
+            SELECT s.*, u.display_name as creator_name, u.username as creator_username
+            FROM schedules s
+            LEFT JOIN admin_users u ON s.created_by = u.user_id
+            {where}
+            ORDER BY shift_date DESC, CASE shift_type
+                WHEN 'day' THEN 1 WHEN 'evening' THEN 2 WHEN 'night' THEN 3 END
+        """, vals)
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_schedule(schedule_id: str) -> dict | None:
+    """Get a schedule with its assignments + nurse/patient details."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+
+        cur = await conn.execute("""
+            SELECT s.*, u.display_name as creator_name, u.username as creator_username
+            FROM schedules s
+            LEFT JOIN admin_users u ON s.created_by = u.user_id
+            WHERE s.schedule_id = ?
+        """, (schedule_id,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        sched = dict(row)
+
+        # Fetch assignments with nurse + patient info
+        cur = await conn.execute("""
+            SELECT sa.*,
+                   au.username as nurse_username, au.display_name as nurse_name, au.role as nurse_role,
+                   pr.name as patient_name, pr.mrn as patient_mrn, pr.room as patient_room,
+                   pr.bed as patient_bed, pr.acuity as patient_acuity, pr.diagnosis as patient_diagnosis
+            FROM schedule_assignments sa
+            JOIN admin_users au ON sa.nurse_user_id = au.user_id
+            JOIN patients_registry pr ON sa.patient_id = pr.patient_id
+            WHERE sa.schedule_id = ?
+            ORDER BY au.display_name, pr.room, pr.bed
+        """, (schedule_id,))
+        assignments = [dict(r) for r in await cur.fetchall()]
+        sched["assignments"] = assignments
+        return sched
+
+
+async def update_schedule(schedule_id: str, **kwargs) -> bool:
+    """Update schedule fields: status, notes, published_at."""
+    allowed = {"status", "notes", "published_at"}
+    sets, vals = [], []
+    for k, v in kwargs.items():
+        if k in allowed:
+            sets.append(f"{k} = ?")
+            vals.append(v)
+    if not sets:
+        return False
+    sets.append("updated_at = ?")
+    vals.append(datetime.now().isoformat())
+    vals.append(schedule_id)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(f"UPDATE schedules SET {', '.join(sets)} WHERE schedule_id = ?", vals)
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def delete_schedule(schedule_id: str) -> bool:
+    """Delete a schedule and all its assignments."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM schedule_assignments WHERE schedule_id = ?", (schedule_id,))
+        cur = await conn.execute("DELETE FROM schedules WHERE schedule_id = ?", (schedule_id,))
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+# ─── Schedule Assignments ────────────────────────────────────────────────────
+
+async def add_assignment(schedule_id: str, nurse_user_id: str, patient_id: str,
+                         is_primary: bool = True, notes: str = "") -> dict:
+    """Add a single nurse ↔ patient assignment to a schedule."""
+    assignment_id = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO schedule_assignments
+               (assignment_id, schedule_id, nurse_user_id, patient_id, is_primary, notes, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (assignment_id, schedule_id, nurse_user_id, patient_id, int(is_primary), notes, now),
+        )
+        await conn.commit()
+    return {"assignment_id": assignment_id, "schedule_id": schedule_id,
+            "nurse_user_id": nurse_user_id, "patient_id": patient_id,
+            "is_primary": is_primary, "notes": notes}
+
+
+async def remove_assignment(assignment_id: str) -> bool:
+    """Remove a single assignment."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute("DELETE FROM schedule_assignments WHERE assignment_id = ?", (assignment_id,))
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def clear_schedule_assignments(schedule_id: str) -> int:
+    """Remove all assignments for a schedule (before re-generating)."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute("DELETE FROM schedule_assignments WHERE schedule_id = ?", (schedule_id,))
+        await conn.commit()
+        return cur.rowcount
+
+
+# ─── Auto-Scheduling Algorithm ───────────────────────────────────────────────
+
+async def auto_schedule(schedule_id: str, max_patients_per_nurse: int = 6) -> dict:
+    """
+    Automatically assign admitted patients to active nurses using an
+    acuity-balanced greedy algorithm.
+
+    Strategy:
+      1. Fetch all admitted patients sorted by acuity DESC (sickest first).
+      2. Fetch all active nurse-role users.
+      3. Use a min-heap style approach: assign each patient to the nurse
+         with the lowest current total acuity load, respecting the per-nurse cap.
+      4. Persist the assignments and return summary.
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        now = datetime.now().isoformat()
+
+        # 1. Admitted patients
+        cur = await conn.execute(
+            "SELECT patient_id, name, acuity, room, bed FROM patients_registry WHERE status = 'admitted' ORDER BY acuity DESC, room, bed"
+        )
+        patients = [dict(r) for r in await cur.fetchall()]
+
+        # 2. Active nurses (role IN nurse, charge_nurse, supervisor — NOT admin)
+        cur = await conn.execute(
+            "SELECT user_id, username, display_name, role FROM admin_users WHERE is_active = 1 AND role IN ('nurse', 'charge_nurse', 'supervisor') ORDER BY display_name"
+        )
+        nurses = [dict(r) for r in await cur.fetchall()]
+
+        if not nurses:
+            return {"error": "No active nurses found", "assigned": 0, "unassigned": len(patients)}
+        if not patients:
+            return {"error": "No admitted patients found", "assigned": 0, "unassigned": 0}
+
+        # 3. Clear existing assignments
+        await conn.execute("DELETE FROM schedule_assignments WHERE schedule_id = ?", (schedule_id,))
+
+        # 4. Greedy acuity-balanced assignment
+        # Track each nurse's load: {user_id: {"acuity_total": int, "count": int}}
+        nurse_load = {n["user_id"]: {"acuity_total": 0, "count": 0, "info": n} for n in nurses}
+        assigned = []
+        unassigned = []
+
+        for patient in patients:
+            # Find the nurse with the lowest acuity load who hasn't hit the cap
+            best_nurse_id = None
+            best_load = float("inf")
+            for uid, load in nurse_load.items():
+                if load["count"] < max_patients_per_nurse and load["acuity_total"] < best_load:
+                    best_load = load["acuity_total"]
+                    best_nurse_id = uid
+
+            if best_nurse_id is None:
+                # All nurses at capacity
+                unassigned.append(patient)
+                continue
+
+            assignment_id = str(uuid.uuid4())
+            await conn.execute(
+                """INSERT INTO schedule_assignments
+                   (assignment_id, schedule_id, nurse_user_id, patient_id, is_primary, notes, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (assignment_id, schedule_id, best_nurse_id, patient["patient_id"], 1, "", now),
+            )
+            nurse_load[best_nurse_id]["acuity_total"] += patient["acuity"]
+            nurse_load[best_nurse_id]["count"] += 1
+            assigned.append({"patient": patient["name"], "nurse": nurse_load[best_nurse_id]["info"]["display_name"],
+                             "acuity": patient["acuity"]})
+
+        await conn.commit()
+
+        # Build summary per nurse
+        nurse_summary = []
+        for uid, load in nurse_load.items():
+            if load["count"] > 0:
+                nurse_summary.append({
+                    "nurse": load["info"]["display_name"] or load["info"]["username"],
+                    "user_id": uid,
+                    "patient_count": load["count"],
+                    "total_acuity": load["acuity_total"],
+                    "avg_acuity": round(load["acuity_total"] / load["count"], 1) if load["count"] else 0,
+                })
+
+        return {
+            "assigned": len(assigned),
+            "unassigned": len(unassigned),
+            "total_patients": len(patients),
+            "total_nurses": len(nurses),
+            "max_patients_per_nurse": max_patients_per_nurse,
+            "nurse_summary": nurse_summary,
+            "unassigned_patients": [{"name": p["name"], "acuity": p["acuity"]} for p in unassigned],
+        }
+
+
+async def get_previous_shift_nurse(patient_id: str, shift_date: str, shift_type: str) -> dict | None:
+    """
+    Find which nurse had this patient in the PREVIOUS shift.
+    Shift order: day → evening → night → (next day) day.
+    Returns {nurse_user_id, nurse_name, shift_date, shift_type} or None.
+    """
+    # Determine the previous shift
+    if shift_type == "evening":
+        prev_type, prev_date = "day", shift_date
+    elif shift_type == "night":
+        prev_type, prev_date = "evening", shift_date
+    else:  # day → previous night
+        from datetime import timedelta
+        d = datetime.strptime(shift_date, "%Y-%m-%d") - timedelta(days=1)
+        prev_type, prev_date = "night", d.strftime("%Y-%m-%d")
+
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("""
+            SELECT sa.nurse_user_id,
+                   COALESCE(au.display_name, au.username) AS nurse_name,
+                   s.shift_date, s.shift_type
+            FROM schedule_assignments sa
+            JOIN schedules s ON sa.schedule_id = s.schedule_id
+            JOIN admin_users au ON sa.nurse_user_id = au.user_id
+            WHERE sa.patient_id = ?
+              AND s.shift_date = ?
+              AND s.shift_type = ?
+              AND s.status IN ('draft', 'published')
+            LIMIT 1
+        """, (patient_id, prev_date, prev_type))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_nurse_schedule(nurse_user_id: str, shift_date: str | None = None) -> list[dict]:
+    """Get a specific nurse's assigned patients across schedules, optionally filtered by date."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        if shift_date:
+            cur = await conn.execute("""
+                SELECT s.schedule_id, s.shift_date, s.shift_type, s.status,
+                       sa.assignment_id, sa.is_primary, sa.notes as assignment_notes,
+                       sa.handoff_status,
+                       pr.patient_id, pr.name as patient_name, pr.mrn, pr.room, pr.bed,
+                       pr.acuity, pr.diagnosis, pr.status as patient_status
+                FROM schedule_assignments sa
+                JOIN schedules s ON sa.schedule_id = s.schedule_id
+                JOIN patients_registry pr ON sa.patient_id = pr.patient_id
+                WHERE sa.nurse_user_id = ? AND s.shift_date = ? AND s.status IN ('draft', 'published')
+                ORDER BY s.shift_type, pr.acuity DESC, pr.room, pr.bed
+            """, (nurse_user_id, shift_date))
+        else:
+            cur = await conn.execute("""
+                SELECT s.schedule_id, s.shift_date, s.shift_type, s.status,
+                       sa.assignment_id, sa.is_primary, sa.notes as assignment_notes,
+                       sa.handoff_status,
+                       pr.patient_id, pr.name as patient_name, pr.mrn, pr.room, pr.bed,
+                       pr.acuity, pr.diagnosis, pr.status as patient_status
+                FROM schedule_assignments sa
+                JOIN schedules s ON sa.schedule_id = s.schedule_id
+                JOIN patients_registry pr ON sa.patient_id = pr.patient_id
+                WHERE sa.nurse_user_id = ? AND s.status IN ('draft', 'published')
+                ORDER BY s.shift_date DESC, s.shift_type, pr.acuity DESC, pr.room, pr.bed
+            """, (nurse_user_id,))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_schedule_stats() -> dict:
+    """Get scheduling overview statistics."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+
+        # Total counts
+        cur = await conn.execute("SELECT COUNT(*) as count FROM patients_registry WHERE status = 'admitted'")
+        row = await cur.fetchone()
+        admitted = row["count"] if row else 0
+
+        cur = await conn.execute("SELECT COUNT(*) as count FROM admin_users WHERE is_active = 1 AND role IN ('nurse', 'charge_nurse', 'supervisor')")
+        row = await cur.fetchone()
+        active_nurses = row["count"] if row else 0
+
+        cur = await conn.execute("SELECT COUNT(*) as count FROM schedules WHERE status = 'published'")
+        row = await cur.fetchone()
+        published = row["count"] if row else 0
+
+        cur = await conn.execute("SELECT COUNT(*) as count FROM schedules WHERE status = 'draft'")
+        row = await cur.fetchone()
+        drafts = row["count"] if row else 0
+
+        # Acuity distribution
+        cur = await conn.execute("""
+            SELECT acuity, COUNT(*) as count
+            FROM patients_registry WHERE status = 'admitted'
+            GROUP BY acuity ORDER BY acuity DESC
+        """)
+        acuity_dist = [dict(r) for r in await cur.fetchall()]
+
+        return {
+            "admitted_patients": admitted,
+            "active_nurses": active_nurses,
+            "published_schedules": published,
+            "draft_schedules": drafts,
+            "acuity_distribution": acuity_dist,
+            "avg_patients_per_nurse": round(admitted / active_nurses, 1) if active_nurses else 0,
+        }
+
+
+async def mark_assignment_handoff_complete(assignment_id: str) -> bool:
+    """Mark a schedule assignment's handoff_status as 'completed'."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "UPDATE schedule_assignments SET handoff_status = 'completed' WHERE assignment_id = ?",
+            (assignment_id,)
+        )
+        await conn.commit()
+        return cur.rowcount > 0
+

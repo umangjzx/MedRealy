@@ -1,0 +1,15 @@
+{
+  "recording_id": "b49c690e-8de5-4e48-8a8c-07ea2aa5abae",
+  "original_format": "audio/webm",
+  "original_ext": ".webm",
+  "original_size_bytes": 1182143,
+  "wav_size_bytes": 2348238,
+  "duration_estimate_sec": 73.4,
+  "saved_at": "2026-03-04T21:42:40.140314",
+  "raw_path": "C:\\Users\\UMANG JAISWAL N\\OneDrive\\Desktop\\MedRelay\\recordings\\b49c690e-8de5-4e48-8a8c-07ea2aa5abae.webm",
+  "wav_path": "C:\\Users\\UMANG JAISWAL N\\OneDrive\\Desktop\\MedRelay\\recordings\\b49c690e-8de5-4e48-8a8c-07ea2aa5abae.wav",
+  "outgoing_nurse": "u",
+  "incoming_nurse": "Sarah Johnson",
+  "session_id": "3c7b671d-ac75-4ff7-ad95-68282dfaca23",
+  "chunk_count": 36
+}

@@ -13,18 +13,19 @@ ROLE_PERMISSIONS = {
         "purge_demos", "bulk_delete", "view_analytics", "view_sessions",
         "create_handoff", "sign_off", "import_excel", "change_any_password",
         "assign_roles", "view_all_patients", "export_data",
+        "manage_schedules", "manage_patient_registry", "view_schedule",
     },
     "supervisor": {
         "view_audit", "view_analytics", "view_sessions", "manage_sessions",
         "create_handoff", "sign_off", "import_excel", "view_all_patients",
-        "export_data",
+        "export_data", "view_schedule",
     },
     "charge_nurse": {
         "view_analytics", "view_sessions", "create_handoff", "sign_off",
-        "import_excel", "view_all_patients", "export_data",
+        "import_excel", "view_all_patients", "export_data", "view_schedule",
     },
     "nurse": {
-        "view_sessions", "create_handoff", "sign_off",
+        "view_sessions", "create_handoff", "sign_off", "view_schedule",
     },
 }
 

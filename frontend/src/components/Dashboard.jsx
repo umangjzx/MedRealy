@@ -5,6 +5,7 @@
  */
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../contexts/AuthContext";
+import CMIOBriefing from "./CMIOBriefing";
 
 const API = `http://${window.location.hostname}:8000`;
 
@@ -331,6 +332,31 @@ function TrendBars({ data, labelKey, valueKey, color = "bg-cyan-500", title, sec
   );
 }
 
+// ─── Risk Heatmap ────────────────────────────────────────────────────────────
+function RiskHeatmap({ risks }) {
+  if (!risks?.length) return <p className="text-slate-500 text-sm text-center py-6">No risk data detected.</p>;
+  const maxVal = Math.max(...risks.map(r => r.count), 1);
+
+  return (
+    <div className="space-y-3">
+      {risks.map((item, i) => (
+        <div key={i} className="flex items-center gap-3 text-sm">
+          <div className="w-1/3 text-right text-slate-400 truncate" title={item.alert}>
+            {item.alert}
+          </div>
+          <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+             <div 
+               className="h-full bg-gradient-to-r from-red-500 to-orange-500 rounded-full" 
+               style={{ width: `${(item.count / maxVal) * 100}%` }}
+             />
+          </div>
+          <div className="w-8 text-slate-300 font-mono text-xs text-right">{item.count}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Nurse Pairs ─────────────────────────────────────────────────────────────
 function NursePairs({ pairs }) {
   if (!pairs?.length) return <p className="text-slate-500 text-sm">No pair data yet.</p>;
@@ -462,6 +488,9 @@ export default function Dashboard() {
         <button onClick={load} className="px-4 py-2 btn-ghost rounded-lg text-sm">↻ Refresh</button>
       </div>
 
+      {/* CMIO Executive Agent Briefing */}
+      <CMIOBriefing />
+
       {/* Tabs */}
       <TabBar tabs={dashTabs} active={tab} onChange={setTab} />
 
@@ -554,6 +583,16 @@ export default function Dashboard() {
           </div>
 
           <div className="glass rounded-xl p-5">
+            <TrendBars 
+              data={a.efficiency_trend} 
+              labelKey="day" 
+              valueKey="avg_score" 
+              color="bg-emerald-400" 
+              title="Daily Efficiency Trend (Avg Score)" 
+            />
+          </div>
+
+          <div className="glass rounded-xl p-5">
             <h3 className="text-sm font-semibold text-slate-300 mb-4">Daily Alert Trend (last 30 days)</h3>
             {(t.alert_trend?.length) ? (
               <>
@@ -629,37 +668,20 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="glass rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-slate-300 mb-4">Weekly Quality Score Trend</h3>
-            {(q.weekly_quality?.length) ? (
-              <>
-                <div className="flex items-end gap-1 h-32">
-                  {q.weekly_quality.map((w, i) => (
-                    <div key={i} className="flex-1 flex flex-col items-center gap-1 group">
-                      <span className="text-[9px] text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
-                        {w.quality_score}
-                      </span>
-                      <div
-                        className={`w-full rounded-t-sm transition-all duration-300 ${
-                          w.quality_score >= 80 ? "bg-emerald-500" :
-                          w.quality_score >= 60 ? "bg-yellow-500" : "bg-red-500"
-                        }`}
-                        style={{ height: `${w.quality_score}%`, minHeight: w.quality_score > 0 ? "4px" : "0" }}
-                        title={`${w.week}: ${w.quality_score}`}
-                      />
-                      <span className="text-[7px] text-slate-500 truncate w-full text-center">{w.week?.slice(-4)}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex gap-4 mt-2 text-[10px] text-slate-500">
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500 rounded-sm" /> ≥80 Good</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 bg-yellow-500 rounded-sm" /> ≥60 Fair</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500 rounded-sm" /> &lt;60 Needs work</span>
-                </div>
-              </>
-            ) : (
-              <p className="text-slate-500 text-sm text-center py-6">Not enough data yet.</p>
-            )}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="glass rounded-xl p-5">
+              <TrendBars 
+                data={a.quality_trend} 
+                labelKey="day" 
+                valueKey="avg_score" 
+                color="bg-amber-400" 
+                title="Daily Quality Score Trend" 
+              />
+            </div>
+            <div className="glass rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-slate-300 mb-4">Risk Heatmap (Top Alerts)</h3>
+              <RiskHeatmap risks={a.risk_heatmap} />
+            </div>
           </div>
         </div>
       )}

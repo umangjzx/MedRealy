@@ -317,104 +317,30 @@ function SessionsTab() {
   );
 }
 
-function ChangePasswordTab() {
-  const { authFetch } = useAuth();
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState({ type: "", text: "" });
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setMessage({ type: "", text: "" });
-
-    if (newPassword.length < 6) {
-      setMessage({ type: "error", text: "New password must be at least 6 characters." });
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setMessage({ type: "error", text: "New passwords do not match." });
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const res = await authFetch(`${API}/auth/change-password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          current_password: currentPassword,
-          new_password: newPassword,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || "Failed to change password");
-      }
-      setMessage({ type: "success", text: "Password changed successfully. You may need to re-login." });
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-    } catch (err) {
-      setMessage({ type: "error", text: err.message });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="glass rounded-xl p-4 max-w-md">
-      <h3 className="font-semibold mb-4">Change Password</h3>
-      <form onSubmit={handleSubmit} className="space-y-3">
-        <div>
-          <label className="block text-xs text-slate-400 mb-1">Current Password</label>
-          <input type="password" className="input-premium w-full" value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)} required />
-        </div>
-        <div>
-          <label className="block text-xs text-slate-400 mb-1">New Password</label>
-          <input type="password" className="input-premium w-full" value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)} required minLength={6} />
-        </div>
-        <div>
-          <label className="block text-xs text-slate-400 mb-1">Confirm New Password</label>
-          <input type="password" className="input-premium w-full" value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)} required minLength={6} />
-        </div>
-
-        {message.text && (
-          <div className={`rounded-lg px-3 py-2 text-sm ${
-            message.type === "error"
-              ? "bg-red-900/40 border border-red-500/60 text-red-200"
-              : "bg-emerald-900/40 border border-emerald-500/60 text-emerald-200"
-          }`}>
-            {message.text}
-          </div>
-        )}
-
-        <button type="submit" disabled={saving} className="w-full py-2.5 rounded-lg btn-primary text-sm font-semibold disabled:opacity-60">
-          {saving ? "Changing…" : "Change Password"}
-        </button>
-      </form>
-    </div>
-  );
-}
-
 export default function AdminPanel() {
-  const { user, hasPermission } = useAuth();
+  const { user, hasPermission, isAdmin } = useAuth();
 
-  // Tabs filtered by the current user's permissions
+  // Admin-only tabs
   const allTabs = [
     { key: "users",    label: "Users",    perm: "manage_users" },
     { key: "settings", label: "Settings", perm: "manage_settings" },
     { key: "audit",    label: "Audit",    perm: "view_audit" },
     { key: "sessions", label: "Sessions", perm: "manage_sessions" },
-    { key: "password", label: "Password", perm: null },  // always visible
   ];
   const tabs = allTabs.filter((t) => !t.perm || hasPermission(t.perm));
 
-  const [tab, setTab] = useState(tabs[0]?.key || "password");
+  const [tab, setTab] = useState(tabs[0]?.key || "users");
+
+  // ── STRICT ADMIN GUARD ── Non-admins should never reach this component
+  if (!isAdmin) {
+    return (
+      <div className="max-w-xl mx-auto mt-20 text-center animate-fadeIn">
+        <p className="text-5xl mb-4">🔒</p>
+        <h2 className="text-2xl font-semibold text-slate-200">Access Denied</h2>
+        <p className="text-slate-400 mt-2">This panel is only available to administrators.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto mt-8 px-4 pb-12 animate-fadeIn">
@@ -445,7 +371,6 @@ export default function AdminPanel() {
       {tab === "settings" && <SettingsTab />}
       {tab === "audit" && <AuditTab />}
       {tab === "sessions" && <SessionsTab />}
-      {tab === "password" && <ChangePasswordTab />}
     </div>
   );
 }

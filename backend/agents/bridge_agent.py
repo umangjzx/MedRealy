@@ -9,7 +9,11 @@ from datetime import datetime
 from backend.config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from backend.models import SBARData, RiskAlert, FinalReport
 
-_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+_client = None
+if ANTHROPIC_API_KEY:
+    try:
+        _client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    except: pass
 
 
 class BridgeAgent:
@@ -43,17 +47,25 @@ class BridgeAgent:
             "7. HANDOFF DETAILS (nurses, timestamp)\n"
         )
 
-        try:
-            response = await _client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=2500,
-                temperature=0.2,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            block = response.content[0]
-            rendered = getattr(block, "text", "") or ""
-        except Exception as e:
-            print(f"[BridgeAgent] Report generation failed: {e}")
+        rendered = ""
+
+        # 1. Try Claude
+        if ANTHROPIC_API_KEY and _client:
+            try:
+                response = await _client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=2500,
+                    temperature=0.2,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                block = response.content[0]
+                rendered = getattr(block, "text", "") or ""
+            except Exception as e:
+                print(f"[BridgeAgent] Claude report generation failed: {e}")
+
+        # 2. Fallback
+        if not rendered:
+            print("[BridgeAgent] Using fallback deterministic report")
             rendered = _fallback_report(sbar, alerts, outgoing, incoming, timestamp)
 
         return FinalReport(

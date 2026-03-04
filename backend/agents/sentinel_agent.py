@@ -28,6 +28,47 @@ class SentinelAgent:
         alerts.sort(key=lambda a: severity_order.get(a.severity, 3))
         return alerts
 
+
+    def calculate_raw_score(self, sbar: SBARData, alerts: list[RiskAlert]):
+        """Calculate a 0-100 risk score based on alerts and vital signs."""
+        from backend.models import DetailedRiskScore
+
+        base_score = 0
+        factors = []
+        
+        # Weighted alerts
+        for alert in alerts:
+            if alert.severity == "HIGH":
+                base_score += 25
+                trunc_desc = alert.description.split('—')[0].strip()
+                factors.append(trunc_desc)
+            elif alert.severity == "MEDIUM":
+                base_score += 10
+                trunc_desc = alert.description.split('—')[0].strip()
+                factors.append(trunc_desc)
+            elif alert.severity == "LOW":
+                base_score += 5
+
+        # Critical vital check independently (Sepsis check)
+        v = sbar.assessment.vitals
+        if (v.hr or 0) > 90 and (v.rr or 0) > 20: 
+            base_score += 15
+            factors.append("SIRS Criteria Met")
+
+        # Cap at 100
+        final_score = min(100, base_score)
+        
+        level = "LOW"
+        if final_score >= 80: level = "CRITICAL"
+        elif final_score >= 60: level = "HIGH"
+        elif final_score >= 30: level = "MODERATE"
+        
+        return DetailedRiskScore(
+            score=final_score,
+            risk_level=level,
+            contributing_factors=list(set(factors))[:5]  # Limit to top 5
+        )
+
     # ------------------------------------------------------------------
     # Vital sign threshold checks (with borderline warnings)
     # ------------------------------------------------------------------

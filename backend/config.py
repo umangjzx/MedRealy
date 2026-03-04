@@ -9,9 +9,18 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # no longer used for transcription
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
+# Validate Anthropic API Key format (simple check)
+if ANTHROPIC_API_KEY and (ANTHROPIC_API_KEY.startswith("http") or "your-openai-api-key" in ANTHROPIC_API_KEY or not ANTHROPIC_API_KEY.startswith("sk-")):
+    warnings.warn(f"Invalid ANTHROPIC_API_KEY detected. Disabling API usage.", stacklevel=2)
+    ANTHROPIC_API_KEY = None
+
 # Warn (don't crash) if API keys are missing — demo mode still works
 if not ANTHROPIC_API_KEY:
     warnings.warn("ANTHROPIC_API_KEY not set — Claude extraction/report will fall back to demo data")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    warnings.warn("GEMINI_API_KEY not set — Gemini model will fall back to demo data")
 
 # ── AI Model Configuration ────────────────────────────────────────────────────
 # Transcription is now handled locally via faster-whisper (no API key needed)

@@ -31,8 +31,8 @@ function SignoffDots({ outgoing, incoming }) {
 }
 
 export default function SessionHistory({ onViewSession }) {
-  const { authFetch, hasPermission } = useAuth();
-  const canDelete = hasPermission("manage_sessions");
+  const { authFetch, isAdmin } = useAuth();
+  const canDelete = isAdmin;  // Only admins can delete sessions
   const [sessions, setSessions] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);

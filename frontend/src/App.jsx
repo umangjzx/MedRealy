@@ -8,6 +8,8 @@ import SessionHistory from "./components/SessionHistory";
 import Dashboard from "./components/Dashboard";
 import PatientTimeline from "./components/PatientTimeline";
 import AdminPanel from "./components/AdminPanel";
+import NurseSchedule from "./components/NurseSchedule";
+import UserProfile from "./components/UserProfile";
 import LoginPage from "./components/LoginPage";
 import { useWebSocket } from "./api/websocket";
 import { useAuth } from "./contexts/AuthContext";
@@ -48,20 +50,38 @@ function ProgressStepper({ currentStage }) {
 
 // ─── Main App ────────────────────────────────────────────────────────────────
 export default function App() {
-  const { user, isAuthenticated, hasPermission, roleDisplay, loading: authLoading, logout, authFetch, accessToken } = useAuth();
+  const { user, isAuthenticated, isAdmin, roleDisplay, loading: authLoading, logout, authFetch, accessToken } = useAuth();
 
-  const [screen, setScreen]             = useState("start");     // start | active | report | history | dashboard | timeline | admin
+  const [screen, setScreen]             = useState("schedule");  // confirm-handoff | active | report | history | dashboard | timeline | admin | profile | schedule
   const [outgoingNurse, setOutgoingNurse] = useState("");
   const [incomingNurse, setIncomingNurse] = useState("");
-  const [patientRoom, setPatientRoom]   = useState("");
   const [sessionData, setSessionData]   = useState(null);
-  const [demoLoading, setDemoLoading]   = useState(false);
   const [error, setError]               = useState("");
   const [timelinePatient, setTimelinePatient] = useState("");
-  const [previousScreen, setPreviousScreen]   = useState("start");
+  const [previousScreen, setPreviousScreen]   = useState("schedule");
+  const [handoffPatient, setHandoffPatient]   = useState(null);
+  const [handoffLoading, setHandoffLoading]   = useState(false);
+  const [language, setLanguage]         = useState("en");
+
+  // Mark assignment as completed after successful handoff
+  const markAssignmentCompleted = useCallback(async (assignmentId) => {
+    if (!assignmentId) return;
+    try {
+      await authFetch(`http://${window.location.hostname}:8000/scheduling/assignments/${assignmentId}/handoff-complete`, {
+        method: "PUT",
+      });
+    } catch { /* non-fatal */ }
+  }, [authFetch]);
 
   const { connect, disconnect, sendMessage, sendAudio, sessionState } = useWebSocket({
-    onComplete: (data) => { setSessionData(data); setScreen("report"); },
+    onComplete: (data) => {
+      setSessionData(data);
+      setScreen("report");
+      // Auto-mark assignment as completed
+      if (handoffPatient?.assignment_id) {
+        markAssignmentCompleted(handoffPatient.assignment_id);
+      }
+    },
     onError: (msg) => setError(msg),
   });
 
@@ -70,41 +90,49 @@ export default function App() {
       setError("Please enter both nurse names."); return;
     }
     setError(""); setScreen("active");
-    connect(outgoingNurse.trim(), incomingNurse.trim(), accessToken);
+    connect(outgoingNurse.trim(), incomingNurse.trim(), accessToken, language);
   };
 
   const handleEndHandoff = () => sendMessage({ type: "end" });
 
-  const handleDemo = async () => {
-    if (demoLoading) return;
-    setDemoLoading(true); setError("");
-    try {
-      const res = await authFetch(`http://${window.location.hostname}:8000/demo`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          outgoing: outgoingNurse.trim() || "Nurse Sarah Chen",
-          incoming: incomingNurse.trim() || "Nurse Marcus Rivera",
-        }),
-      });
-      if (!res.ok) throw new Error(`Server error: ${res.status}`);
-      const data = await res.json();
-      setSessionData(data); setScreen("report");
-    } catch (e) {
-      setError(`Demo failed: ${e.message}. Make sure the backend is running.`);
-    } finally { setDemoLoading(false); }
-  };
-
   const handleReset = () => {
     disconnect();
-    setScreen("start");
+    setScreen("schedule");
     setSessionData(null);
     setError("");
     setOutgoingNurse("");
     setIncomingNurse("");
-    setPatientRoom("");
     setTimelinePatient("");
+    setHandoffPatient(null);
+    setHandoffLoading(false);
+    setLanguage("en");
   };
+
+  // Start handoff from a scheduled patient assignment
+  const handleScheduleHandoff = useCallback(async (patient) => {
+    setError("");
+    setHandoffLoading(true);
+
+    // Current user is the INCOMING nurse (they are viewing their upcoming shift)
+    const incomingName = user?.display_name || user?.username || "";
+    setIncomingNurse(incomingName);
+    // Try to auto-detect the OUTGOING nurse from the previous shift
+    let outgoingName = "";
+    try {
+      const res = await authFetch(
+        `http://${window.location.hostname}:8000/scheduling/patients/${patient.patient_id}/previous-nurse?shift_date=${patient.shift_date}&shift_type=${patient.shift_type}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data.found) outgoingName = data.nurse_name || "";
+      }
+    } catch { /* swallow — user can enter manually */ }
+
+    setOutgoingNurse(outgoingName);
+    setHandoffPatient(patient);
+    setHandoffLoading(false);
+    setScreen("confirm-handoff");
+  }, [user, authFetch]);
 
   const handleViewTimeline = useCallback((patientName) => {
     setPreviousScreen(screen);
@@ -126,20 +154,25 @@ export default function App() {
       is_demo:        !!data.is_demo,
       signed_by_outgoing: !!data.signed_by_outgoing,
       signed_by_incoming: !!data.signed_by_incoming,
+      compliance:     data.compliance   ?? {},
+      pharma:         data.pharma       ?? {},
+      trend:          data.trend        ?? {},
+      educator:       data.educator     ?? {},
+      debrief:        data.debrief      ?? {},
     };
     setSessionData(sd); setScreen("report");
   }, []);
 
-  // ── Navigation items — driven by permissions ─────────────────────────────
-  const canViewAnalytics = hasPermission("view_analytics");
-  const canViewAdmin = hasPermission("manage_users") || hasPermission("manage_settings")
-    || hasPermission("view_audit") || hasPermission("manage_sessions");
+  // ── Navigation items — strictly role-gated ─────────────────────────────────
+  // USER features (all roles): New Handoff, History, Profile
+  // ADMIN features (admin only): Analytics, Admin Panel
 
   const navItems = [
-    { key: "start",     label: "New Handoff", always: true },
-    { key: "history",   label: "History",     always: true },
-    ...(canViewAnalytics ? [{ key: "dashboard", label: "Analytics" }] : []),
-    ...(canViewAdmin     ? [{ key: "admin",     label: "Admin" }]     : []),
+    { key: "history",   label: "History" },
+    { key: "schedule",  label: "Schedule" },
+    ...(isAdmin ? [{ key: "dashboard", label: "Analytics" }]  : []),
+    ...(isAdmin ? [{ key: "admin",     label: "Admin" }]      : []),
+    { key: "profile",   label: "Profile" },
   ];
 
   // ── Auth loading spinner ──────────────────────────────────────────────────
@@ -157,62 +190,66 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen text-white font-sans">
-      {/* ── Top bar ── */}
-      <header className="sticky top-0 z-30 border-b border-indigo-500/20 bg-slate-950/80 backdrop-blur-xl px-4 sm:px-6 py-3 flex items-center justify-between">
-        <button
-          onClick={handleReset}
-          className="flex items-center gap-3 hover:opacity-90 transition-opacity"
-        >
-          <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-sm bg-gradient-to-br from-indigo-500 to-cyan-500 shadow-lg shadow-indigo-500/30">M</div>
-          <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-indigo-300 to-cyan-300 bg-clip-text text-transparent">MedRelay</span>
-          <span className="text-xs text-slate-400 ml-1 hidden sm:inline">Clinical Intelligence</span>
-        </button>
-
-        <nav className="flex items-center gap-2">
-          {navItems.map((item) => {
-            const active = screen === item.key;
-            return (
-              <button
-                key={item.key}
-                onClick={() => {
-                  if (item.key === "start") { handleReset(); return; }
-                  setScreen(item.key);
-                }}
-                className={`text-sm px-3 py-1.5 rounded-lg border transition-all ${
-                  active
-                    ? "bg-indigo-500/20 border-indigo-400/40 text-indigo-200"
-                    : "btn-ghost text-slate-300"
-                }`}
-              >
-                {item.label}
-              </button>
-            );
-          })}
-          {user && (
-            <div className="hidden md:flex items-center gap-1.5">
-              <span className="text-xs text-slate-400 border border-slate-700 rounded-lg px-2 py-1">
-                {user.display_name || user.username}
-              </span>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${
-                user.role === "admin" ? "text-red-300 border-red-500/40 bg-red-500/10" :
-                user.role === "supervisor" ? "text-amber-300 border-amber-500/40 bg-amber-500/10" :
-                user.role === "charge_nurse" ? "text-purple-300 border-purple-500/40 bg-purple-500/10" :
-                "text-cyan-300 border-cyan-500/40 bg-cyan-500/10"
-              }`}>
-                {roleDisplay}
-              </span>
-            </div>
-          )}
+    <div className="min-h-screen text-white font-sans selection:bg-indigo-500/30">
+      {/* ── Floating Navbar ── */}
+      <div className="fixed top-4 left-0 right-0 z-50 flex justify-center px-4">
+        <header className="glass rounded-2xl px-4 py-2 flex items-center justify-between w-full max-w-5xl shadow-2xl backdrop-blur-xl border-slate-700/50">
           <button
-            onClick={logout}
-            className="text-xs text-slate-400 hover:text-red-300 transition-colors px-2 py-1 rounded-lg border border-transparent hover:border-red-500/30"
-            title="Sign out"
+            onClick={handleReset}
+            className="flex items-center gap-3 hover:opacity-80 transition-all active:scale-95"
           >
-            Logout
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm bg-gradient-to-br from-indigo-500 via-purple-500 to-cyan-500 shadow-lg shadow-indigo-500/20">M</div>
+            <span className="text-lg font-bold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent hidden sm:block">MedRelay</span>
           </button>
-        </nav>
-      </header>
+
+          <nav className="flex items-center gap-1">
+            {navItems.map((item) => {
+              const active = screen === item.key;
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => setScreen(item.key)}
+                  className={`relative text-xs sm:text-sm px-3 sm:px-4 py-1.5 rounded-lg transition-all duration-300 font-medium ${
+                    active
+                      ? "text-white bg-white/10 shadow-inner"
+                      : "text-slate-400 hover:text-white hover:bg-white/5"
+                  }`}
+                >
+                  {item.label}
+                  {active && (
+                    <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-1 h-1 bg-indigo-400 rounded-full mb-1"></span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="flex items-center gap-3 pl-4 border-l border-slate-700/50">
+            {user && (
+              <div className="hidden md:flex flex-col items-end leading-none">
+                <span className="text-xs font-semibold text-slate-200">
+                  {user.display_name?.split(" ")[0]}
+                </span>
+                <span className={`text-[9px] uppercase tracking-wider font-bold ${
+                  user.role === "admin" ? "text-red-400" : "text-cyan-400"
+                }`}>
+                  {roleDisplay}
+                </span>
+              </div>
+            )}
+            <button
+              onClick={logout}
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-red-500/10 text-slate-400 hover:text-red-400 transition-colors"
+              title="Sign out"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            </button>
+          </div>
+        </header>
+      </div>
+
+      {/* ── Spacing for fixed header ── */}
+      <div className="h-24"></div>
 
       {/* ── Error banner ── */}
       {error && (
@@ -223,73 +260,112 @@ export default function App() {
       )}
 
       {/* ════════════════════════════════════════════════════════════════════
-          SCREEN 1 — Start
+          SCREEN 1 — Confirm Handoff (from schedule)
       ════════════════════════════════════════════════════════════════════ */}
-      {screen === "start" && (
-        <main className="max-w-6xl mx-auto mt-10 px-4 pb-14 animate-fadeIn">
-          <div className="grid lg:grid-cols-2 gap-8 items-start">
-            <section className="pt-4">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-indigo-400/30 bg-indigo-500/10 text-indigo-200 text-xs mb-4">
-                AI-Powered Clinical Handoffs
-              </div>
-              <h1 className="text-4xl sm:text-5xl font-semibold leading-tight mb-4">
-                A premium handoff workspace for safer shift transitions.
-              </h1>
-              <p className="text-slate-300 max-w-xl leading-relaxed">
-                Record naturally, generate structured SBAR, flag clinical risks, and complete dual sign-off in one streamlined experience.
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-7">
-                <div className="glass rounded-xl p-3">
-                  <p className="text-xs text-slate-400">Pipeline</p>
-                  <p className="text-sm font-semibold text-cyan-300">Relay → Extract → Sentinel → Bridge</p>
-                </div>
-                <div className="glass rounded-xl p-3">
-                  <p className="text-xs text-slate-400">Transcription</p>
-                  <p className="text-sm font-semibold text-indigo-300">Local faster-whisper</p>
-                </div>
-                <div className="glass rounded-xl p-3">
-                  <p className="text-xs text-slate-400">Persistence</p>
-                  <p className="text-sm font-semibold text-emerald-300">SQLite + Audit Trail</p>
-                </div>
-              </div>
-            </section>
+      {screen === "confirm-handoff" && handoffPatient && (
+        <main className="max-w-xl mx-auto mt-10 px-4 pb-14 animate-fadeIn">
+          <div className="glass rounded-3xl p-8 border border-indigo-500/20 shadow-2xl relative overflow-hidden">
+            {/* Background decoration */}
+            <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
 
-            <section className="glass rounded-2xl p-6 sm:p-7 border border-indigo-500/20">
-              <h2 className="text-xl font-semibold text-indigo-200 mb-1">Start a Handoff</h2>
-              <p className="text-sm text-slate-400 mb-5">Enter care team details and begin recording.</p>
+            <h2 className="text-3xl font-bold bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent mb-2">Handoff Session</h2>
+            <p className="text-sm text-slate-400 mb-8">Review details and verify nurse pairing to begin.</p>
 
-              <div className="space-y-4">
+            {/* Patient info card */}
+            <div className="rounded-2xl bg-white/5 border border-white/10 p-5 mb-6 backdrop-blur-sm">
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <h3 className="font-bold text-white text-xl tracking-tight">{handoffPatient.patient_name}</h3>
+                  <p className="text-xs text-indigo-300 font-medium mt-0.5">ID: {handoffPatient.mrn}</p>
+                </div>
+                {handoffPatient.acuity && (
+                  <span className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                    handoffPatient.acuity >= 4 ? "bg-red-500/20 text-red-300 border-red-500/30" :
+                    handoffPatient.acuity === 3 ? "bg-amber-500/20 text-amber-300 border-amber-500/30" :
+                    "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                  }`}>
+                    Acuity {handoffPatient.acuity}
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-y-2 text-sm text-slate-400">
+                {handoffPatient.room && <div className="flex items-center gap-2"><span>🏥</span> Room {handoffPatient.room}</div>}
+                {handoffPatient.diagnosis && <div className="col-span-2 flex items-center gap-2 text-slate-300"><span>📋</span> {handoffPatient.diagnosis}</div>}
+              </div>
+            </div>
+
+            {/* Nurse pairing */}
+            <div className="grid grid-cols-2 gap-4 mb-8">
+              <div className="group rounded-2xl bg-slate-800/40 border border-slate-700/50 p-4 hover:bg-slate-800/60 transition-colors">
+                <p className="text-[10px] text-slate-500 uppercase tracking-wider font-bold mb-2">Outgoing Nurse</p>
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="Identify nurse..."
+                    value={outgoingNurse}
+                    onChange={(e) => setOutgoingNurse(e.target.value)}
+                    className="w-full bg-transparent border-b border-slate-600 focus:border-indigo-400 py-1 text-white font-medium outline-none transition-colors placeholder:text-slate-600"
+                  />
+                  <div className="absolute right-0 top-1.5 w-2 h-2 rounded-full bg-slate-600 group-hover:bg-indigo-400 transition-colors"></div>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-2">Previous shift</p>
+              </div>
+              
+              <div className="rounded-2xl bg-gradient-to-br from-indigo-500/10 to-cyan-500/5 border border-indigo-500/20 p-4">
+                <p className="text-[10px] text-indigo-300/70 uppercase tracking-wider font-bold mb-2">Incoming Nurse</p>
+                <div className="py-1 border-b border-indigo-500/30">
+                  <p className="text-indigo-100 font-medium">{incomingNurse}</p>
+                </div>
+                <p className="text-[10px] text-indigo-300/50 mt-2">You (Current shift)</p>
+              </div>
+            </div>
+
+            {/* Language Selection Pills */}
+            <div className="mb-8">
+              <p className="text-xs text-slate-500 uppercase tracking-wide mb-3 font-semibold">Session Language</p>
+              <div className="flex gap-3">
                 {[
-                  { label: "Outgoing Nurse", val: outgoingNurse, set: setOutgoingNurse, ph: "e.g. Sarah Chen, RN" },
-                  { label: "Incoming Nurse", val: incomingNurse, set: setIncomingNurse, ph: "e.g. Marcus Rivera, RN" },
-                  { label: "Patient Room",   val: patientRoom,   set: setPatientRoom,   ph: "e.g. ICU-4B" },
-                ].map(({ label, val, set, ph }) => (
-                  <div key={label}>
-                    <label className="block text-xs text-slate-400 mb-1 uppercase tracking-wide">{label}</label>
-                    <input
-                      type="text"
-                      placeholder={ph}
-                      value={val}
-                      onChange={(e) => set(e.target.value)}
-                      className="input-premium w-full"
-                    />
-                  </div>
+                  { code: "en", label: "English", icon: "A" },
+                  { code: "hi", label: "Hindi",   icon: "अ" },
+                  { code: "ta", label: "Tamil",   icon: "அ" },
+                ].map(({ code, label, icon }) => (
+                  <button
+                    key={code}
+                    onClick={() => setLanguage(code)}
+                    className={`flex-1 flex flex-col items-center justify-center py-3 rounded-xl border transition-all duration-200 ${
+                      language === code
+                        ? "bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-900/20 scale-105"
+                        : "bg-slate-800/30 border-slate-700/50 text-slate-400 hover:bg-slate-700/50 hover:border-slate-600"
+                    }`}
+                  >
+                    <span className="text-lg font-serif mb-1 opacity-80">{icon}</span>
+                    <span className="text-xs font-medium">{label}</span>
+                  </button>
                 ))}
               </div>
+            </div>
 
-              <div className="pt-5 space-y-3">
-                <button onClick={handleStartHandoff} className="w-full p-3.5 rounded-xl text-base font-semibold btn-primary">
-                  🎙 Begin Live Handoff
-                </button>
-                <button
-                  onClick={handleDemo}
-                  disabled={demoLoading}
-                  className="w-full p-3.5 rounded-xl text-base font-semibold btn-accent disabled:opacity-60 flex items-center justify-center gap-2"
-                >
-                  {demoLoading ? <><span className="animate-spin">⟳</span> Running Demo…</> : "⚡ Run Demo (No Audio)"}
-                </button>
-              </div>
-            </section>
+            {/* Actions */}
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={handleStartHandoff}
+                disabled={!outgoingNurse.trim()}
+                className={`w-full py-4 rounded-xl text-base font-bold tracking-wide shadow-xl transition-all duration-300 transform ${
+                  outgoingNurse.trim() 
+                    ? "bg-gradient-to-r from-indigo-600 to-cyan-600 hover:shadow-indigo-500/25 hover:scale-[1.02] active:scale-[0.98] text-white" 
+                    : "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700"
+                }`}
+              >
+                {outgoingNurse.trim() ? "🎙 Start Live Session" : "Enter Outgoing Nurse to Start"}
+              </button>
+              
+              <button
+                onClick={() => { setHandoffPatient(null); setScreen("schedule"); }}
+                className="w-full py-3 rounded-xl text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </main>
       )}
@@ -346,14 +422,40 @@ export default function App() {
       )}
 
       {/* ════════════════════════════════════════════════════════════════════
-          SCREEN 5 — Dashboard Analytics (requires view_analytics)
+          SCREEN 5 — Dashboard Analytics (admin only)
       ════════════════════════════════════════════════════════════════════ */}
-      {screen === "dashboard" && canViewAnalytics && <Dashboard />}
+      {screen === "dashboard" && isAdmin && <Dashboard />}
+      {screen === "dashboard" && !isAdmin && (
+        <div className="max-w-xl mx-auto mt-20 text-center animate-fadeIn">
+          <p className="text-5xl mb-4">🔒</p>
+          <h2 className="text-2xl font-semibold text-slate-200">Access Denied</h2>
+          <p className="text-slate-400 mt-2">Analytics dashboard is only available to administrators.</p>
+          <button onClick={handleReset} className="mt-6 px-5 py-2 rounded-lg btn-primary text-sm">Back to Home</button>
+        </div>
+      )}
 
       {/* ════════════════════════════════════════════════════════════════════
-          SCREEN 6 — Admin (requires admin-level permission)
+          SCREEN 6 — Admin Panel (admin only)
       ════════════════════════════════════════════════════════════════════ */}
-      {screen === "admin" && canViewAdmin && <AdminPanel />}
+      {screen === "admin" && isAdmin && <AdminPanel />}
+      {screen === "admin" && !isAdmin && (
+        <div className="max-w-xl mx-auto mt-20 text-center animate-fadeIn">
+          <p className="text-5xl mb-4">🔒</p>
+          <h2 className="text-2xl font-semibold text-slate-200">Access Denied</h2>
+          <p className="text-slate-400 mt-2">Admin panel is only available to administrators.</p>
+          <button onClick={handleReset} className="mt-6 px-5 py-2 rounded-lg btn-primary text-sm">Back to Home</button>
+        </div>
+      )}
+
+      {/* ════════════════════════════════════════════════════════════════════
+          SCREEN 6b — User Profile (all roles)
+      ════════════════════════════════════════════════════════════════════ */}
+      {screen === "profile" && <UserProfile />}
+
+      {/* ════════════════════════════════════════════════════════════════════
+          SCREEN 8 — Nurse Scheduling (all roles)
+      ════════════════════════════════════════════════════════════════════ */}
+      {screen === "schedule" && <NurseSchedule onStartHandoff={!isAdmin ? handleScheduleHandoff : undefined} handoffLoading={handoffLoading} />}
 
       {/* ════════════════════════════════════════════════════════════════════
           SCREEN 7 — Patient Timeline

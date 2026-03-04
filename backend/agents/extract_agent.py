@@ -10,14 +10,36 @@ import anthropic
 from backend.config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from backend.models import SBARData
 
-_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+_client = None
+if ANTHROPIC_API_KEY:
+    try:
+        _client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    except: pass
 
 _SBAR_SCHEMA = """{
-  "patient":     { "name": "", "age": "", "mrn": "", "room": "" },
-  "situation":   { "primary_diagnosis": "", "reason_for_admission": "", "current_status": "" },
-  "background":  { "relevant_history": "", "medications": [], "allergies": [], "recent_procedures": [] },
-  "assessment":  { "vitals": { "bp": "", "hr": null, "rr": null, "temp": null, "spo2": null }, "labs_pending": [], "labs_recent": [] },
-  "recommendation": { "care_plan": "", "escalation_triggers": "", "pending_orders": [], "next_steps": "" }
+  "patient": { "name": "", "age": "", "mrn": "", "room": "" },
+  "situation": { "primary_diagnosis": "", "reason_for_admission": "", "current_status": "" },
+  "background": { "relevant_history": "", "medications": [], "allergies": [], "recent_procedures": [] },
+  "assessment": { 
+    "vitals": { "bp": "", "hr": 0, "rr": 0, "temp": 0.0, "spo2": 0 }, 
+    "labs_pending": [], "labs_recent": [], 
+    "pain_level": 0, 
+    "neurological_status": "" 
+  },
+  "recommendation": { 
+    "care_plan": "", 
+    "escalation_triggers": "", 
+    "pending_orders": [], 
+    "next_steps": "", 
+    "action_items": [
+      { "task": "", "priority": "MEDIUM", "due_time": "", "assignee": "Incoming Nurse" }
+    ]
+  },
+  "risk_score": { 
+    "score": 0, 
+    "risk_level": "LOW", 
+    "contributing_factors": [] 
+  }
 }"""
 
 
@@ -34,26 +56,22 @@ class ExtractAgent:
     async def extract(self, transcript: str) -> SBARData:
         """Extract SBAR data: try Claude first, then HuggingFace local model."""
 
-        # ── 1. Try Claude (best quality, needs valid API key) ────────────
-        if ANTHROPIC_API_KEY:
+        # ── 1. Try Claude (Primary) ──────────────────────────────────────
+        if _client:
             try:
                 result = await self._extract_claude(transcript)
-                if result.patient.name is not None or result.situation.primary_diagnosis is not None:
+                if result.patient.name is not None:
                     print("[ExtractAgent] Claude extraction succeeded")
                     return result
-                print("[ExtractAgent] Claude returned empty SBAR — falling through to HF model")
             except Exception as e:
-                print(f"[ExtractAgent] Claude failed: {e} — falling through to HF model")
+                print(f"[ExtractAgent] Claude failed: {e}")
 
-        # ── 2. Fall back to local HuggingFace model (no API key needed) ──
+        # ── 2. Fall back to local HuggingFace model ──────────────────────
         try:
-            print("[ExtractAgent] Using HuggingFace local model for SBAR extraction...")
+            print("[ExtractAgent] Falling back to HuggingFace local model...")
             hf = self._get_hf_agent()
             result = await hf.extract(transcript)
-            if result.patient.name is not None or result.situation.primary_diagnosis is not None:
-                print("[ExtractAgent] HuggingFace extraction succeeded")
-                return result
-            print("[ExtractAgent] HuggingFace returned empty SBAR")
+            return result
         except Exception as e:
             print(f"[ExtractAgent] HuggingFace extraction failed: {e}")
 

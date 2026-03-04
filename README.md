@@ -1,361 +1,161 @@
-# MedRelay
+# MedRelay 🏥
 
-AI-assisted clinical handoff platform for nursing shift transitions.
+> **Next-Generation Clinical Intelligence & Handoff Platform**
 
-MedRelay captures (or imports) handoff data, structures it into SBAR, runs risk checks, generates a human-readable report, and supports digital sign-off plus admin operations.
-
----
-
-## What this system includes
-
-- Real-time handoff flow over WebSocket
-- Audio transcription using `SpeechRecognition` (Google Speech API)
-- Multi-stage SBAR extraction with fallback pipeline
-- Risk analysis against clinical thresholds
-- SQLite persistence for sessions, analytics, and timelines
-- Admin console backend APIs (users, settings, audit, session maintenance)
-- Demo mode + complete demo patient payload
-- Excel feed import endpoint for structured handoff ingestion
+MedRelay is an advanced AI-powered system designed to modernize nursing shift transitions. It captures verbal handoffs, structures them into standardized SBAR reports using local AI models, performs real-time risk analysis, and provides deep clinical analytics—all wrapped in a premium, glassmorphism-inspired interface.
 
 ---
 
-## Architecture
+## 🌟 Key Features
 
-### Backend (FastAPI)
+### 🧠 Intelligent Handoffs
+- **Real-time Transcription**: Converts voice to text instantly during bedside handoffs.
+- **SBAR Structuring**: Automatically organizes chaotic speech into Situation, Background, Assessment, Recommendation.
+- **Multi-Agent AI**: Specialized agents for Risk (Sentinel), Education, Pharmacy, and Debriefing.
 
-- Entry: `backend/main.py`
-- Pipeline: `backend/pipeline.py`
-- Agents:
-  - `backend/agents/relay_agent.py` (audio + transcription)
-  - `backend/agents/extract_agent.py` (LLM/HF extraction)
-  - `backend/agents/sentinel_agent.py` (risk alerts)
-  - `backend/agents/bridge_agent.py` (final report text)
-- Data layer: `backend/database.py` (SQLite)
-- Data models: `backend/models.py`
+### 📊 Advanced Analytics
+- **Efficiency Trends**: Track handoff duration and efficiency scores over time.
+- **Risk Heatmaps**: Visualize recurring high-severity alerts to identify systemic issues.
+- **Quality Scoring**: Automated grading of handoff completeness and clarity (0-100 scale).
 
-### Frontend (React + Vite + Tailwind v4)
-
-- Entry: `frontend/src/App.jsx`
-- Screens:
-  - Start / Active Handoff / Report
-  - History / Dashboard / Patient Timeline
-  - Admin panel
+### 🎨 Modern Experience
+- **Glassmorphism UI**: A stunning, dark-themed interface with dynamic gradients and blur effects.
+- **Floating Dock Navigation**: App-like experience with smooth transitions.
+- **Interactive Workflows**: Step-by-step guidance from recording to digital sign-off.
 
 ---
 
-## Requirements
+## 🏗️ Architecture
 
-- Windows (current workspace target)
-- Python 3.11+ (3.13 works)
-- Node.js 18+ and npm
-- Virtual environment at `.venv`
+MedRelay uses a modern decoupled architecture with a FastAPI backend and React frontend, connected via WebSockets for real-time streaming.
 
----
+```mermaid
+graph TD
+    subgraph Frontend [React + Vite]
+        UI[Glassmorphism UI]
+        WS_Client[WebSocket ClientWrapper]
+        Recorder[Audio Handler]
+    end
 
-## Quick start (Windows / PowerShell)
+    subgraph Backend [FastAPI + Python]
+        API[Admin REST API]
+        WS_Server[WebSocket Endpoint]
+        
+        subgraph Pipeline [Agent Orchestration]
+            Transcriber[Relay Agent<br/>(Transcription)]
+            SBAR[Extract Agent<br/>(SBAR Creation)]
+            Risk[Sentinel Agent<br/>(Risk Analysis)]
+            Report[Bridge Agent<br/>(Text Gen)]
+            
+            subgraph Analytics_Logic
+                Scores[Debrief Agent]
+                Meds[Pharma Agent]
+                History[Trend Agent]
+                Learn[Educator Agent]
+            end
+        end
+        
+        DB[(SQLite Database)]
+    end
 
-### 1) Backend
-
-```powershell
-cd "c:\Users\UMANG JAISWAL N\OneDrive\Desktop\MedRelay"
-& ".\.venv\Scripts\Activate.ps1"
-& ".\.venv\Scripts\python.exe" -m pip install -r .\backend\requirements.txt
-$env:PYTHONPATH = $PWD.Path
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+    UI --> Recorder
+    Recorder --> WS_Client
+    WS_Client <--> WS_Server
+    WS_Server --> Pipeline
+    Pipeline --> DB
+    API <--> DB
 ```
 
-### 2) Frontend
+### Core Agents
+1.  **Relay Agent**: Handles audio stream processing and transcription.
+2.  **Extract Agent**: Uses optimized models to parse unstructured text into structured JSON.
+3.  **Sentinel Agent**: Deterministic rules engine to flag high-risk keywords (e.g., "sepsis", "unstable").
+4.  **Bridge Agent**: Synthesizes the final readable report.
+5.  **Specialists**: Pharma (medication safety), Educator (learning resources), Debrief (quality scoring), Trend (historical analysis).
 
+---
+
+## 🛠️ Tech Stack
+
+### Backend
+- **Framework**: FastAPI (Python 3.11+)
+- **Database**: SQLite (`aiosqlite`) - Zero-config persistence.
+- **Concurrency**: Asyncio & WebSockets.
+- **AI/ML**: `transformers`, `torch`, `langgraph` (Moving towards optimized local execution).
+
+### Frontend
+- **Framework**: React 19 + Vite.
+- **Styling**: Tailwind CSS v4 + Custom CSS Variables.
+- **Design System**: Premium Glassmorphism (blur/transparency/gradients).
+- **State**: React Context API + Custom Hooks.
+- **Visuals**: CSS-only charts for lightweight performance.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+
+
+### 1. Backend Setup
 ```powershell
-cd "c:\Users\UMANG JAISWAL N\OneDrive\Desktop\MedRelay\frontend"
+cd MedRelay
+# Create & Activate Virtual Env
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# Install Dependencies
+pip install -r backend/requirements.txt
+
+# Run Server (Hot Reload)
+python -m uvicorn backend.main:app --reload
+```
+
+### 2. Frontend Setup
+```powershell
+cd MedRelay/frontend
+# Install Dependencies
 npm install
-npm run dev -- --host 127.0.0.1 --port 5173
+
+# Run Dev Server
+npm run dev
 ```
 
-### 3) Open app
-
-- Frontend: `http://127.0.0.1:5173`
-- Backend health: `http://127.0.0.1:8000/health`
-
----
-
-## Demo data options
-
-### A) Pipeline demo run
-
-`POST /demo` runs a full synthetic handoff pipeline and saves a session.
-
-### B) Full demo patient payload
-
-`GET /demo/patient` returns a complete SBAR-compatible demo patient object with all required fields.
-
-### C) Excel feed file
-
-Prebuilt workbook:
-
-- `demo/medrelay_feed_data.xlsx`
-
-Includes sheets:
-
-- `Feed_Instructions`
-- `Patient_Feed_Template`
-- `Risk_Alerts_Seed`
-- `Transcript_Seed`
+### 3. Access
+- **App**: [http://localhost:5173](http://localhost:5173)
+- **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ---
 
-## Excel import endpoint
+## 🔐 Admin & Security
+Default Credentials (Demo Mode):
+- **User**: `admin`
+- **Pass**: `1234`
 
-### Endpoint
-
-`POST /import/excel?dry_run=true|false`
-
-- Upload a `.xlsx` file as multipart form field: `file`
-- Uses sheet `Patient_Feed_Template` if present, otherwise first sheet
-- Validates required columns per row (at minimum `patient_name`, `primary_diagnosis`)
-- Returns row-level import errors and imported session IDs
-
-### Example (PowerShell using curl)
-
-```powershell
-$filePath = "c:\Users\UMANG JAISWAL N\OneDrive\Desktop\MedRelay\demo\medrelay_feed_data.xlsx"
-curl.exe -X POST "http://127.0.0.1:8000/import/excel?dry_run=true" -F "file=@$filePath"
-```
+**Role-Based Access Control (RBAC):**
+- **Admin**: Full system access, analytics, user management.
+- **Supervisor**: Analytics view, audit logs.
+- **Nurse**: Handoff creation, history view.
 
 ---
 
-## Admin API
-
-### Auth
-
-- `POST /admin/login`
-- Default seeded admin: `admin / 1234`
-
-### Core endpoints
-
-- `GET /admin/users`
-- `POST /admin/users`
-- `PATCH /admin/users/{user_id}`
-- `DELETE /admin/users/{user_id}`
-- `GET /admin/settings`
-- `PUT /admin/settings`
-- `GET /admin/audit?limit=100`
-- `POST /admin/sessions/bulk-delete`
-
-### Safe demo purge
-
-`POST /admin/sessions/purge-demos?dry_run=true|false`
-
-- Default behavior is safe (`dry_run=true`)
-- Dry run returns `would_delete`
-- Actual delete requires `dry_run=false`
+## 📈 Analytics Dashboard
+access the new dashboard at `/dashboard` (Admin role required).
+1.  **Overview**: Real-time census, acuity breakdown, compliance stats.
+2.  **Trends**: Efficiency scores and handoff volume analysis.
+3.  **Quality**: Automated scoring of handoff fidelity and completeness.
+4.  **Risk**: Heatmap visualization of frequent clinical alerts.
 
 ---
 
-## Role-Based Access Control (RBAC)
-
-MedRelay supports four permission roles, each with granular access:
-
-| Role | Display Name | Key Permissions |
-| ------ | ------------- | ----------------- |
-| `admin` | Administrator | Full access — manage users, settings, audit, sessions, analytics, import/export |
-| `supervisor` | Supervisor | View analytics, audit logs, manage sessions, view/create handoffs, sign-off |
-| `charge_nurse` | Charge Nurse | View analytics, create handoffs, sign-off, import Excel, export data |
-| `nurse` | Nurse | View sessions, create handoffs, sign-off (minimal access) |
-
-### Permission strings
-
-- `manage_users` — create/edit/delete users (admin only)
-- `manage_settings` — edit system settings (admin only)
-- `view_audit` — read audit log (admin, supervisor)
-- `manage_sessions` — bulk-delete, purge sessions (admin, supervisor)
-- `view_analytics` — access analytics dashboard (admin, supervisor, charge_nurse)
-- `view_sessions` — list/view handoff sessions (all roles)
-- `create_handoff` — start new handoffs (all roles)
-- `sign_off` — sign off on handoffs (all roles)
-- `import_excel` — import Excel feed files (admin, supervisor, charge_nurse)
-- `export_data` — export session data (admin, supervisor, charge_nurse)
-
-### RBAC endpoints
-
-- `GET /roles` — list all roles with display names and permissions
-- `GET /auth/permissions` — get current user's role and permissions
-
-### Creating users with roles
-
-When creating via `POST /admin/users`, set the `role` field to one of: `admin`, `supervisor`, `charge_nurse`, `nurse`.
+## 🤝 Contribution
+1.  Fork the repository.
+2.  Create a feature branch (`git checkout -b feature/AmazingFeature`).
+3.  Commit changes (`git commit -m 'Add AmazingFeature'`).
+4.  Push to branch (`git push origin feature/AmazingFeature`).
+5.  Open a Pull Request.
 
 ---
 
-## Analytics Dashboard
-
-The dashboard provides four views accessible via tabs:
-
-### Overview
-
-- Total sessions, unique patients, high alerts, sign-off rate, quality score
-- Daily handoff volume bar chart
-- Alert severity distribution
-- Sign-off compliance ring
-- Hourly heatmap
-- Top diagnoses
-
-### Nurse Performance
-
-- Top outgoing nurses (by handoffs given) with sign-off rates
-- Top incoming nurses (by handoffs received)
-- Most frequent nurse pairs
-
-### Trends
-
-- Weekly sessions vs fully signed (12 weeks)
-- Monthly sessions vs unique patients (12 months)
-- Daily alert trend by severity (30 days) — stacked bars
-
-### Quality
-
-- Overall quality score (0–100) based on data completeness + sign-off compliance
-- Summary statistics (avg alerts/session, completeness %)
-- Per-field completeness bars (patient name, MRN, diagnosis, room, report, dual sign-off)
-- Weekly quality score trend with color-coded thresholds
-
-### Analytics API endpoints
-
-- `GET /analytics` — overview analytics (existing)
-- `GET /stats` — quick stats (existing)
-- `GET /analytics/nurses` — nurse performance data
-- `GET /analytics/trends` — weekly/monthly/daily trend data
-- `GET /analytics/quality` — quality score and completeness metrics
-
----
-
-## WebSocket handoff protocol
-
-Endpoint: `ws://127.0.0.1:8000/ws/handoff`
-
-### Client messages
-
-- Start real handoff:
-
-```json
-{"type":"start","outgoing":"Nurse A","incoming":"Nurse B"}
-```
-
-- Stream binary audio chunks
-- End handoff:
-
-```json
-{"type":"end"}
-```
-
-- Run demo handoff:
-
-```json
-{"type":"demo","outgoing":"Nurse A","incoming":"Nurse B"}
-```
-
-### Server stage messages
-
-- `listening`
-- `transcribing`
-- `transcript`
-- `extracting`
-- `extract`
-- `sentinel`
-- `bridge`
-- `complete`
-- `error`
-
----
-
-## Important runtime behavior
-
-### Real transcription fallback guardrail
-
-For live (non-demo) handoff:
-
-- If audio fails to transcribe, MedRelay now returns an explicit error
-- It **does not** silently inject demo/fake patient data
-
-Demo data is only used when explicitly requested (`/demo` or WebSocket `type: demo`).
-
----
-
-## Troubleshooting
-
-### Backend starts but API times out
-
-1. Kill stale processes:
-
-```powershell
-taskkill /F /IM uvicorn.exe 2>$null
-taskkill /F /IM python.exe 2>$null
-```
-
-1. Restart backend without stale reload chain:
-
-```powershell
-cd "c:\Users\UMANG JAISWAL N\OneDrive\Desktop\MedRelay"
-$env:PYTHONPATH = $PWD.Path
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-```
-
-### Frontend `npm run dev` exits unexpectedly
-
-Use explicit host/port:
-
-```powershell
-cd "c:\Users\UMANG JAISWAL N\OneDrive\Desktop\MedRelay\frontend"
-npm run dev -- --host 127.0.0.1 --port 5173
-```
-
-### Live recording gives no transcript
-
-- Confirm browser mic permission is granted
-- Confirm input device is active and receiving audio
-- Speak for at least 8–12 seconds before ending
-- Check backend logs for relay/transcription errors
-
-### Import endpoint fails with multipart error
-
-Install dependency in `.venv`:
-
-```powershell
-& ".\.venv\Scripts\python.exe" -m pip install python-multipart
-```
-
----
-
-## Data storage
-
-SQLite DB file:
-
-- `medrelay.db`
-
-Contains:
-
-- session records
-- sign-off states
-- admin users
-- system settings
-- audit logs
-
----
-
-## Security note (demo defaults)
-
-The seeded admin credentials (`admin / 1234`) are for local demo/development only. Rotate immediately for shared or production environments.
-
----
-
-## Current model stack (local + fallback)
-
-- Transcription: `SpeechRecognition` (Google Speech API, requires internet)
-- SBAR extraction: Claude if valid key, else HuggingFace fallback
-- Risk checks: deterministic threshold-based sentinel rules
-
----
-
-## License / usage
-
-This repository is currently configured for internal demo and development workflows.
+**MedRelay** — *Streamlining Care, One Handoff at a Time.*
