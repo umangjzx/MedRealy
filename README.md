@@ -129,10 +129,6 @@ npm run dev
 ---
 
 ## 🔐 Admin & Security
-Default Credentials (Demo Mode):
-- **User**: `admin`
-- **Pass**: `1234`
-
 **Role-Based Access Control (RBAC):**
 - **Admin**: Full system access, analytics, user management.
 - **Supervisor**: Analytics view, audit logs.
