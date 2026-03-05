@@ -92,13 +92,43 @@ class SentinelAgent:
             try:
                 # Strip units if present (e.g., "88/54 mmHg" -> "88/54")
                 bp_clean = v.bp.split()[0] if " " in v.bp else v.bp
-                sbp = int(bp_clean.split("/")[0])
+                parts = bp_clean.split("/")
+                sbp = int(parts[0])
+
+                # SBP threshold alerts
                 if sbp < t["sbp"]["low"]:
                     alerts.append(RiskAlert(severity="HIGH", description=f"Hypotension — SBP {sbp} mmHg (threshold < {t['sbp']['low']})", category="vital"))
                 elif sbp > t["sbp"]["high"]:
                     alerts.append(RiskAlert(severity="HIGH", description=f"Hypertension — SBP {sbp} mmHg (threshold > {t['sbp']['high']})", category="vital"))
                 elif sbp <= t["sbp"]["low"] * (1 + _BORDERLINE_PCT):
                     alerts.append(RiskAlert(severity="MEDIUM", description=f"Blood pressure borderline low — SBP {sbp} mmHg (near threshold {t['sbp']['low']})", category="vital"))
+
+                # MAP and DBP alerts (requires diastolic component)
+                if len(parts) >= 2:
+                    dbp = int(parts[1])
+                    map_val = round((sbp + 2 * dbp) / 3, 1)
+
+                    # Source: Surviving Sepsis Campaign 2021 (MAP target >= 65 mmHg)
+                    if map_val < 65:
+                        alerts.append(RiskAlert(
+                            severity="HIGH",
+                            description=f"Critically low MAP {map_val} mmHg (SSC 2021 vasopressor target >= 65 mmHg) — septic shock criteria",
+                            category="vital",
+                        ))
+                    elif map_val < 70:
+                        alerts.append(RiskAlert(
+                            severity="MEDIUM",
+                            description=f"MAP borderline low {map_val} mmHg (SSC 2021 target >= 65 mmHg) — monitor closely",
+                            category="vital",
+                        ))
+
+                    # Severe diastolic hypotension: vascular collapse / aortic regurgitation risk
+                    if dbp < 40:
+                        alerts.append(RiskAlert(
+                            severity="HIGH",
+                            description=f"Severe diastolic hypotension — DBP {dbp} mmHg (< 40 mmHg) — risk of vascular collapse",
+                            category="vital",
+                        ))
             except (ValueError, IndexError):
                 pass
 

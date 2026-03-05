@@ -73,21 +73,78 @@ _INTERACTION_DB: list[tuple[list[str], list[str], str, str, str]] = [
      "CONTRAINDICATED", "Opioid + benzodiazepine: FDA black box warning — risk of respiratory depression and death",
      "Avoid combination; if essential, use lowest doses and monitor respiratory status continuously"),
 
-    # Vasopressor interactions
+    # Vasopressor interactions  [FDA Labeling / Lexicomp]
     (["norepinephrine", "levophed", "vasopressin", "epinephrine"],
      ["maoi", "phenelzine", "tranylcypromine", "selegiline"],
      "CONTRAINDICATED", "Vasopressor + MAO inhibitor: risk of severe hypertensive crisis",
      "Contraindicated combination; use alternative vasopressor strategy"),
+
+    # Warfarin + azole antifungals / metronidazole  [FDA Labeling — CYP2C9 inhibition]
+    (["warfarin", "coumadin"],
+     ["fluconazole", "diflucan", "metronidazole", "flagyl", "voriconazole", "itraconazole", "posaconazole"],
+     "SEVERE", "Warfarin + azole/metronidazole: INR significantly elevated (CYP2C9 inhibition)",
+     "Monitor INR within 48-72h; expect 50-100% INR increase; consider empiric warfarin dose reduction"),
+
+    # Triple Whammy: ACEi/ARB + NSAID -> AKI  [NICE CG182 / Lancet 1994 Thomas et al.]
+    (["lisinopril", "enalapril", "ramipril", "captopril", "benazepril", "losartan", "valsartan", "irbesartan", "candesartan"],
+     ["ibuprofen", "naproxen", "ketorolac", "toradol", "diclofenac", "indomethacin"],
+     "SEVERE", "Triple Whammy: ACEi/ARB + NSAID combined with diuretic causes acute kidney injury (NICE CG182)",
+     "Avoid concurrent NSAID use; monitor creatinine and eGFR; ensure adequate hydration; use acetaminophen instead"),
+
+    # Methotrexate + NSAIDs  [FDA Black Box Warning]
+    (["methotrexate"],
+     ["ibuprofen", "naproxen", "ketorolac", "aspirin", "diclofenac", "indomethacin", "celecoxib"],
+     "CONTRAINDICATED", "Methotrexate + NSAID: FDA Black Box Warning — methotrexate toxicity (myelosuppression, renal failure, GI ulceration)",
+     "Avoid combination; if unavoidable monitor CBC, creatinine, and methotrexate levels closely"),
+
+    # Calcineurin inhibitor + azole antifungal  [FDA Labeling — CYP3A4 inhibition]
+    (["tacrolimus", "prograf", "cyclosporine", "sandimmune", "neoral"],
+     ["fluconazole", "voriconazole", "itraconazole", "posaconazole", "ketoconazole"],
+     "SEVERE", "Calcineurin inhibitor + azole: drug levels elevated 3-5x (CYP3A4 inhibition) -> nephrotoxicity and neurotoxicity",
+     "Reduce calcineurin inhibitor dose by 50-75%; monitor trough drug levels and creatinine daily"),
+
+    # Lithium + NSAIDs / thiazides  [FDA / MHRA Drug Safety Update]
+    (["lithium", "lithobid", "eskalith"],
+     ["ibuprofen", "naproxen", "indomethacin", "diclofenac", "hydrochlorothiazide", "chlorothiazide", "metolazone"],
+     "SEVERE", "Lithium + NSAID/thiazide: lithium levels rise (reduced renal clearance) -> risk of lithium toxicity (tremor, confusion, seizures)",
+     "Monitor lithium levels; use acetaminophen as alternative; avoid sodium restriction; increase monitoring frequency"),
+
+    # Warfarin + macrolide antibiotics  [FDA Labeling — CYP3A4/CYP2C9 + gut flora]
+    (["warfarin", "coumadin"],
+     ["azithromycin", "zithromax", "clarithromycin", "biaxin", "erythromycin"],
+     "SEVERE", "Warfarin + macrolide antibiotic: INR elevated (CYP3A4/CYP2C9 inhibition + gut flora reduction)",
+     "Monitor INR within 5-7 days of starting macrolide; anticipate 15-30% INR increase; counsel on bleeding signs"),
 ]
 
 # ── High-Alert Medications (ISMP list) ────────────────────────────────────────
+# Source: ISMP List of High-Alert Medications in Acute Care Settings (2023 update)
+# https://www.ismp.org/recommendations/high-alert-medications-acute-list
 _HIGH_ALERT_KEYWORDS = [
-    "insulin", "heparin", "warfarin", "opioid", "morphine", "fentanyl",
-    "hydromorphone", "methadone", "epinephrine", "norepinephrine",
-    "vasopressin", "dopamine", "dobutamine", "potassium chloride",
-    "magnesium sulfate", "neuromuscular block", "rocuronium", "succinylcholine",
-    "chemotherapy", "methotrexate", "digoxin", "amiodarone", "nitroprusside",
-    "alteplase", "tpa", "thrombolytic",
+    # Anticoagulants  [ISMP]
+    "insulin", "heparin", "warfarin", "enoxaparin", "fondaparinux",
+    "apixaban", "rivaroxaban", "dabigatran",
+    # Opioids and opioid agonists  [ISMP + FDA Black Box]
+    "opioid", "morphine", "fentanyl", "hydromorphone", "methadone",
+    "oxycodone", "hydrocodone", "meperidine",
+    # Vasoactive / inotropic agents  [ISMP]
+    "epinephrine", "norepinephrine", "vasopressin", "dopamine", "dobutamine",
+    "phenylephrine", "milrinone",
+    # Concentrated electrolytes  [ISMP — never give undiluted]
+    "potassium chloride", "potassium phosphate", "magnesium sulfate",
+    "hypertonic saline", "concentrated sodium chloride", "concentrated dextrose",
+    # Neuromuscular blocking agents (require ventilator)  [ISMP]
+    "neuromuscular block", "rocuronium", "succinylcholine",
+    "cisatracurium", "vecuronium", "pancuronium",
+    # Antiarrhythmics  [ISMP]
+    "digoxin", "amiodarone",
+    # Thrombolytics (tissue plasminogen activators)  [ISMP]
+    "alteplase", "tpa", "thrombolytic", "tenecteplase", "reteplase",
+    # Antineoplastics  [ISMP]
+    "methotrexate", "chemotherapy", "cytarabine", "vincristine",
+    "cyclophosphamide", "bleomycin",
+    # Other high-risk ICU agents  [ISMP]
+    "nitroprusside", "propofol", "ketamine", "dexmedetomidine",
+    "tacrolimus", "cyclosporine",
 ]
 
 # ── Dose Patterns ─────────────────────────────────────────────────────────────
@@ -96,16 +153,29 @@ _DOSE_RE = re.compile(
     r"(\d+(?:\.\d+)?)\s*(mg|g|mcg|units?|ml|meq)\b", re.IGNORECASE
 )
 
-# Known max daily doses for common drugs (very simplified)
+# Max daily dose reference table
+# Sources: FDA prescribing information, ASHP Drug Information, Lexicomp, Micromedex
 _MAX_DOSES: dict[str, tuple[float, str]] = {
-    "vancomycin":      (4000, "mg"),    # 4g/day max
-    "metformin":       (2550, "mg"),
-    "acetaminophen":   (4000, "mg"),
-    "ibuprofen":       (3200, "mg"),
-    "lisinopril":      (80,   "mg"),
-    "furosemide":      (600,  "mg"),
-    "morphine":        (200,  "mg"),    # oral; IV thresholds differ
-    "amiodarone":      (1200, "mg"),    # loading; maintenance is lower
+    # Antibiotics
+    "vancomycin":      (4000,  "mg"),   # Source: ASHP/IDSA/SIDP Vancomycin Guidelines 2020
+    # Analgesics
+    "acetaminophen":   (4000,  "mg"),   # 3g/day in hepatic impairment; Source: FDA labeling
+    "ibuprofen":       (3200,  "mg"),   # Source: FDA prescribing info (Motrin)
+    "morphine":        (200,   "mg"),   # Oral; IV thresholds differ; Source: clinical guidelines
+    # Antidiabetics
+    "metformin":       (2550,  "mg"),   # Hold if eGFR < 30; Source: FDA labeling
+    # Cardiovascular
+    "lisinopril":      (80,    "mg"),   # Source: FDA labeling
+    "furosemide":      (600,   "mg"),   # Higher doses used in AKI; Source: FDA labeling
+    "amiodarone":      (1200,  "mg"),   # Loading phase; maintenance 200-400 mg/day; Source: FDA
+    "digoxin":         (0.25,  "mg"),   # Maintenance 0.125-0.25 mg/day; Source: FDA / AHA HF guidelines
+    # Anticonvulsants
+    "phenytoin":       (300,   "mg"),   # Typical maintenance; monitor levels; Source: FDA labeling
+    # Corticosteroids
+    "prednisone":      (80,    "mg"),   # Most indications; Source: clinical practice guidelines
+    "dexamethasone":   (40,    "mg"),   # High-dose pulse; usual < 16 mg/day; Source: FDA labeling
+    # Neuropathic agents
+    "gabapentin":      (3600,  "mg"),   # Reduce for eGFR < 60; Source: FDA labeling
 }
 
 
