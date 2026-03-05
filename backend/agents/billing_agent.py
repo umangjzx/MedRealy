@@ -2,32 +2,57 @@
 Agent 10 — Billing & Coding Agent
 Analyzes the clinical extraction to suggest ICD-10 diagnosis codes and CPT procedure codes.
 Helps ensuring revenue integrity and documentation completeness for reimbursement.
+
+Primary:  Semantic ICD-10 matching via sentence-transformers (hf_billing_agent).
+Fallback: Keyword-based matching for well-known diagnoses.
 """
 
 from backend.models import SBARData, BillingReport, CodeSuggestion
+
+
+def _semantic_diagnosis_codes(dx_text: str, hist_text: str) -> list[CodeSuggestion]:
+    """Run semantic ICD-10 matching and return CodeSuggestion list."""
+    try:
+        from backend.agents.hf_billing_agent import semantic_icd_match
+        combined = f"{dx_text} {hist_text}".strip()
+        matches = semantic_icd_match(combined, top_k=6, threshold=0.38)
+        return [
+            CodeSuggestion(code=code, description=desc, confidence=round(score, 2))
+            for code, desc, score in matches
+        ]
+    except Exception as e:
+        print(f"[Billing] Semantic ICD matching unavailable: {e}")
+        return []
+
 
 class BillingAgent:
     async def analyse(self, sbar: SBARData) -> BillingReport:
         diagnosis_codes = []
         procedure_codes = []
         complexity = "MODERATE"
-        
-        # ── 1. Diagnosis Logic (Simple Keyword Matching for Demo) ─────────────
+
         dx_text = (sbar.situation.primary_diagnosis or "").lower()
         hist_text = (sbar.background.relevant_history or "").lower()
-        
-        if "sepsis" in dx_text or "septic" in dx_text:
-            diagnosis_codes.append(CodeSuggestion(code="A41.9", description="Sepsis, unspecified organism", confidence=0.95))
-        if "shock" in dx_text:
-            diagnosis_codes.append(CodeSuggestion(code="R65.21", description="Severe sepsis with septic shock", confidence=0.98))
-            complexity = "HIGH"
-        if "pneumonia" in dx_text:
-            diagnosis_codes.append(CodeSuggestion(code="J18.9", description="Pneumonia, unspecified organism", confidence=0.90))
-        if "diabetes" in hist_text:
-            diagnosis_codes.append(CodeSuggestion(code="E11.9", description="Type 2 diabetes mellitus without complications", confidence=0.85))
-        if "hypertension" in hist_text:
-            diagnosis_codes.append(CodeSuggestion(code="I10", description="Essential (primary) hypertension", confidence=0.90))
-            
+
+        # ── 1. Semantic ICD-10 matching via sentence-transformers ─────────────
+        semantic_codes = _semantic_diagnosis_codes(dx_text, hist_text)
+        if semantic_codes:
+            diagnosis_codes.extend(semantic_codes)
+            print(f"[Billing] Semantic matcher found {len(semantic_codes)} ICD-10 candidates")
+        else:
+            # ── 1b. Fallback keyword matching ─────────────────────────────────
+            print("[Billing] Falling back to keyword ICD-10 matching")
+            if "sepsis" in dx_text or "septic" in dx_text:
+                diagnosis_codes.append(CodeSuggestion(code="A41.9", description="Sepsis, unspecified organism", confidence=0.95))
+            if "shock" in dx_text:
+                diagnosis_codes.append(CodeSuggestion(code="R65.21", description="Severe sepsis with septic shock", confidence=0.98))
+                complexity = "HIGH"
+            if "pneumonia" in dx_text:
+                diagnosis_codes.append(CodeSuggestion(code="J18.9", description="Pneumonia, unspecified organism", confidence=0.90))
+            if "diabetes" in hist_text:
+                diagnosis_codes.append(CodeSuggestion(code="E11.9", description="Type 2 diabetes mellitus without complications", confidence=0.85))
+            if "hypertension" in hist_text:
+                diagnosis_codes.append(CodeSuggestion(code="I10", description="Essential (primary) hypertension", confidence=0.90))
         # ── 2. Procedure Logic (CPT codes, AMA 2024) ────────────────────
         # Source: AMA CPT Professional Edition 2024
         procedures = sbar.background.recent_procedures or []

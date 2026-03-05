@@ -2,14 +2,53 @@
 Agent 11 — Literature & Evidence Agent
 Retrieves relevant clinical guidelines and research papers based on the patient's condition.
 Simulates a Clinical Decision Support (CDS) system.
+
+Primary:  Semantic similarity search via sentence-transformers (hf_literature_agent).
+Fallback: Keyword-based matching against a curated static evidence database.
 """
 
 from backend.models import SBARData, LiteratureReport, EvidenceResource
 
+
+def _semantic_search(dx_text: str) -> list[EvidenceResource] | None:
+    """Try semantic evidence search; return None if model unavailable."""
+    try:
+        from backend.agents.hf_literature_agent import semantic_evidence_search
+        matches = semantic_evidence_search(dx_text, top_k=5, threshold=0.30)
+        if not matches:
+            return None
+        resources = [
+            EvidenceResource(
+                title=m["title"],
+                source=m["source"],
+                url=m["url"],
+                summary=m["summary"],
+                relevance_score=m["relevance_score"],
+            )
+            for m in matches
+        ]
+        print(f"[Literature] Semantic search found {len(resources)} evidence resource(s)")
+        return resources
+    except Exception as e:
+        print(f"[Literature] Semantic search unavailable: {e}")
+        return None
+
+
 class LiteratureAgent:
     async def fetch_evidence(self, sbar: SBARData) -> LiteratureReport:
-        resources = []
         dx_text = (sbar.situation.primary_diagnosis or "").lower()
+
+        # ── Primary: semantic search ──────────────────────────────────────────
+        semantic_resources = _semantic_search(dx_text)
+        if semantic_resources:
+            return LiteratureReport(
+                topic=sbar.situation.primary_diagnosis or "General Care",
+                resources=semantic_resources,
+            )
+
+        # ── Fallback: keyword matching ────────────────────────────────────────
+        print("[Literature] Falling back to keyword-based evidence search")
+        resources = []
         
         # ── Sepsis bundle ─────────────────────────────────────────────────────
         if "sepsis" in dx_text or "septic" in dx_text:

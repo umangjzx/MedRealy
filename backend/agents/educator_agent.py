@@ -10,17 +10,8 @@ Uses Claude for rich explanations when available, falls back to a built-in
 knowledge base for common ICU/hospital terms and conditions.
 """
 
-import json
 import re
-import anthropic
-from backend.config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from backend.models import SBARData, ClinicalTip, EducatorReport
-
-_client = None
-if ANTHROPIC_API_KEY:
-    try:
-        _client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    except: pass
 
 
 # ── Built-in terminology dictionary (fallback when Claude unavailable) ────────
@@ -105,17 +96,6 @@ class EducatorAgent:
         # 3. Suggest related protocols
         protocols = self._suggest_protocols(sbar, transcript)
 
-        # 4. Try AI (Claude) for richer contextual education
-        claude_tips = []
-        if _client:
-            try:
-                # Need to update _claude_educate signature? It uses self.
-                claude_tips = await self._claude_educate(sbar, transcript)
-            except Exception as e:
-                print(f"[EducatorAgent] Claude education failed: {e}")
-
-        tips.extend(claude_tips)
-
         return EducatorReport(
             tips=tips,
             terminology=terminology,
@@ -168,32 +148,4 @@ class EducatorAgent:
                         protocols.append(p)
         return protocols
 
-    # ── AI-powered contextual education ───────────────────────────────────
 
-    async def _claude_educate(self, sbar: SBARData, transcript: str) -> list[ClinicalTip]:
-        prompt = (
-            "You are a clinical nurse educator. Based on this patient handoff, generate "
-            "3-5 targeted learning tips for a nursing student or new nurse. "
-            "Focus on the specific conditions, medications, and situations in this handoff. "
-            "Each tip should be practical, evidence-based, and actionable.\n\n"
-            f"Patient: {sbar.patient.name or 'Unknown'}\n"
-            f"Diagnosis: {sbar.situation.primary_diagnosis or 'Unknown'}\n"
-            f"Medications: {', '.join(sbar.background.medications) or 'None listed'}\n"
-            f"Vitals: HR={sbar.assessment.vitals.hr}, BP={sbar.assessment.vitals.bp}, "
-            f"SpO2={sbar.assessment.vitals.spo2}, Temp={sbar.assessment.vitals.temp}\n\n"
-            "Return ONLY a JSON array of objects with keys: "
-            '"topic", "explanation", "evidence_level" (one of GUIDELINE/REVIEW/EXPERT_OPINION), '
-            '"source" (nullable string).\n'
-            "No markdown fences, no commentary."
-        )
-        response = await _client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=1500,
-            temperature=0.3,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = (getattr(response.content[0], "text", "") or "").strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```\s*$", "", raw)
-        data = json.loads(raw)
-        return [ClinicalTip(**item) for item in data]

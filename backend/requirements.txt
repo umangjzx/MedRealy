@@ -2,7 +2,6 @@ fastapi
 uvicorn[standard]
 websockets
 openai
-anthropic
 httpx
 python-dotenv
 pydantic
@@ -12,12 +11,13 @@ pydub
 transformers
 torch
 sentencepiece
+sentence-transformers
 openpyxl
 python-multipart
 pyjwt
 bcrypt
 reportlab
 langgraph
-google-generativeai
+google-genai
 langchain-core
 imageio-ffmpeg

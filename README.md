@@ -35,17 +35,17 @@ Traditional nursing handoffs are verbal, unstructured, and error-prone. Critical
 | Capability | Description |
 |---|---|
 | **Voice Capture** | Browser-based audio recording of the bedside handoff conversation |
-| **Auto-Transcription** | Real-time speech-to-text via Google Speech Recognition |
-| **SBAR Structuring** | Claude AI (with HuggingFace fallback) extracts structured clinical data |
+| **Auto-Transcription** | OpenAI Whisper API (cloud, primary) with Google Speech Recognition as fallback |
+| **SBAR Structuring** | HuggingFace Flan-T5 (local, no API key) extracts structured clinical data |
 | **Risk Analysis** | Sentinel engine flags vital violations, allergy-drug conflicts, and missing documentation |
 | **Medication Safety** | Pharma agent detects drug-drug interactions, dose alerts, and duplicate therapy |
 | **Compliance Auditing** | Validates against Joint Commission NPSG and CMS standards |
-| **Quality Scoring** | Debrief agent grades the handoff 0–100 with coaching feedback |
+| **Quality Scoring** | Debrief agent grades the handoff 0–100 with deterministic coaching feedback |
 | **Trend Tracking** | Trend agent compares current vitals against historical sessions for the same patient |
-| **Clinical Education** | Educator agent surfaces plain-language explanations of medical terms in the transcript |
-| **Billing Assistance** | Billing agent suggests ICD-10 and CPT codes from clinical context |
-| **Evidence Support** | Literature agent retrieves relevant clinical guidelines and research |
-| **CMIO Briefings** | Executive-level AI-generated morning briefings powered by Gemini or Claude |
+| **Clinical Education** | Educator agent surfaces plain-language explanations from a built-in ICU terminology KB |
+| **Billing Assistance** | Semantic ICD-10/CPT matching via sentence-transformers (all-MiniLM-L6-v2) |
+| **Evidence Support** | Semantic guideline retrieval via sentence-transformers (all-MiniLM-L6-v2) |
+| **CMIO Briefings** | Executive-level AI-generated morning briefings powered exclusively by Google Gemini |
 
 ---
 
@@ -54,24 +54,26 @@ Traditional nursing handoffs are verbal, unstructured, and error-prone. Critical
 ### High-Level Flow
 
 ```
-Browser (Mic) ──► WebSocket ──► Relay Agent ──► Transcription
-                                                     │
-                                           Extract Agent (Claude/HF)
+Browser (Mic) ──► WebSocket ──► Relay Agent ──► Whisper API (OpenAI)
+                                                     │  (fallback: Google STT)
+                                           Extract Agent (Flan-T5, local)
                                                      │
                                               Structured SBAR
-                                           ┌──────────┴──────────┐
-                                    Sentinel Agent         Compliance Agent
-                                    (Risk Alerts)          (NPSG/CMS Audit)
-                                           └──────────┬──────────┘
-                                               Bridge Agent
-                                           (Final Report Text)
+                                                     │
+                                           Sentinel Agent
+                                           (Risk Alerts)
                                                      │
                               ┌──────────────────────┼──────────────────────┐
-                         Pharma Agent         Trend Agent            Debrief Agent
-                      (Drug Safety)     (Vital Trajectory)       (Quality Score)
+                       Compliance Agent      Pharma Agent          Trend Agent
+                       (NPSG/CMS)           (Drug Safety)      (Vital Trajectory)
                               │                      │                      │
-                         Educator Agent       Billing Agent        Literature Agent
-                      (Clinical Terms)    (ICD-10 / CPT)       (Evidence/Guidelines)
+                       Educator Agent       Billing Agent        Literature Agent
+                     (Terminology KB)  (all-MiniLM-L6-v2)   (all-MiniLM-L6-v2)
+                              │                      │                      │
+                       Debrief Agent         [ parallel asyncio.gather ]   │
+                      (Quality Score)                │                      │
+                                               Bridge Agent
+                                          (Deterministic Template)
                                                      │
                                            SQLite Database
                                                      │
@@ -102,9 +104,9 @@ graph TB
     subgraph Pipeline["Agent Orchestration Pipeline (LangGraph)"]
         direction TB
         A1["Agent 1 — Relay\n(Speech-to-Text)"]
-        A2["Agent 2 — Extract\n(SBAR Structuring via Claude / HuggingFace)"]
+        A2["Agent 2 — Extract\n(SBAR Structuring via Flan-T5 local)"]
         A3["Agent 3 — Sentinel\n(Risk · Vitals · Allergy Conflicts)"]
-        A4["Agent 4 — Bridge\n(Report Generation via Claude)"]
+        A4["Agent 4 — Bridge\n(Deterministic Template Renderer)"]
         A5["Agent 5 — Compliance\n(NPSG · CMS · I-PASS Audit)"]
         A6["Agent 6 — Pharma\n(Drug Interactions · Dose Alerts)"]
         A7["Agent 7 — Trend\n(Vital Trajectory · Patient History)"]
@@ -112,7 +114,7 @@ graph TB
         A9["Agent 9 — Debrief\n(Handoff Quality Scoring)"]
         A10["Agent 10 — Billing\n(ICD-10 · CPT Coding)"]
         A11["Agent 11 — Literature\n(Guidelines · Evidence)"]
-        A12["Agent 12 — CMIO\n(Executive Briefing — Gemini / Claude)"]
+        A12["Agent 12 — CMIO\n(Executive Briefing — Gemini exclusively)"]
     end
 
     subgraph Storage["Persistence"]
@@ -121,9 +123,11 @@ graph TB
     end
 
     subgraph ExternalAI["External AI Providers"]
-        CLAUDE["Anthropic Claude\n(Extract · Bridge · Debrief · Educator)"]
-        GEMINI["Google Gemini\n(CMIO Briefings)"]
-        GOOGLE_SR["Google Speech\nRecognition (free)"]
+        WHISPER["OpenAI Whisper API\n(Agent 1 — primary STT)"]
+        FLAN["HuggingFace Flan-T5\n(Agent 2 — SBAR extraction, local)"]
+        MINILM["HuggingFace all-MiniLM-L6-v2\n(Agents 10 & 11 — semantic search, local)"]
+        GEMINI["Google Gemini 2.5 Flash\n(Agent 12 — CMIO Briefings)"]
+        GOOGLE_SR["Google Speech Recognition\n(Agent 1 fallback, free)"]
         OPENFDA["OpenFDA API\n(Drug Events)"]
     end
 
@@ -138,7 +142,7 @@ graph TB
     WS_S --> A1
     A1 -->|"transcript"| A2
     A2 -->|"SBAR JSON"| A3
-    A3 -->|"alerts"| A4
+    A3 -->|"alerts + parallel"| A4
     A4 -->|"rendered report"| A5
     A5 --> A6
     A6 --> A7
@@ -149,13 +153,12 @@ graph TB
 
     REST --> A12
 
+    A1 --> WHISPER
     A1 --> GOOGLE_SR
-    A2 --> CLAUDE
-    A4 --> CLAUDE
-    A9 --> CLAUDE
-    A8 --> CLAUDE
+    A2 --> FLAN
+    A10 --> MINILM
+    A11 --> MINILM
     A12 --> GEMINI
-    A12 --> CLAUDE
     A6 --> OPENFDA
 
     Pipeline --> DB
@@ -289,32 +292,32 @@ Built on **LangGraph** as a directed acyclic graph. The pipeline is invoked once
 START
   │
   ▼
-relay_node  ──────────────────────── (Relay Agent: transcribe audio)
+transcribe ────────────────────────── (Relay Agent: Whisper API → Google STT fallback)
+  │
+  ▼                   ┌─ (empty transcript) ─────────────────────────┐
+extract ──────────────┤                                               │
+  │                   └─ (has transcript) ──────────────────────────▼│
+  ▼                                                           bridge_node
+sentinel ─────────────────────────── (Sentinel Agent: risk alerts)   ↑
+  │                                                                   │
+  ▼                                                                   │
+parallel_agents ──── asyncio.gather ─────────────────────────────────┘
+  ├─ compliance
+  ├─ pharma
+  ├─ trend
+  ├─ educator
+  ├─ debrief
+  ├─ billing
+  └─ literature
   │
   ▼
-extract_node ─────────────────────── (Extract Agent: text → SBAR JSON)
-  │
-  ▼
-sentinel_node ────────────────────── (Sentinel Agent: risk alerts)
-  │
-  ▼
-bridge_node ──────────────────────── (Bridge Agent: render final report)
-  │
-  ▼
-[parallel specialist nodes]
-  ├─ compliance_node
-  ├─ pharma_node
-  ├─ trend_node
-  ├─ educator_node
-  ├─ debrief_node
-  ├─ billing_node
-  └─ literature_node
+bridge ─────────────────────────────── (Template renderer: deterministic)
   │
   ▼
 END  →  save to DB  →  stream result to WebSocket client
 ```
 
-**Fallback strategy:** Every node that calls Claude catches API errors and falls back to deterministic heuristics or the built-in knowledge base. A full demo-mode is triggered when no transcript was captured.
+**Execution model:** After `extract` completes, all 7 specialist agents (`compliance`, `pharma`, `trend`, `educator`, `debrief`, `billing`, `literature`) run in **true parallel** via `asyncio.gather`, dramatically reducing end-to-end pipeline latency. A conditional edge skips the full pipeline when no transcript is available and jumps directly to the bridge node. Per-node timing is tracked in `HandoffState.node_timings` for observability. A full demo-mode is triggered when no live transcript was captured.
 
 ---
 
@@ -323,14 +326,21 @@ END  →  save to DB  →  stream result to WebSocket client
 ### Agent 1 — Relay Agent
 **File:** `backend/agents/relay_agent.py`
 
-Receives raw binary audio chunks over the WebSocket, accumulates them in a buffer, and transcribes them using Google's free Speech Recognition API (no key required). Supports WebM, OGG, MP3, WAV, and FLAC; non-WAV formats are auto-converted via `pydub` + `ffmpeg`. Two independent thread-pool executors handle partial (live) and final transcriptions to prevent starvation. `energy_threshold` and `dynamic_energy_threshold` are tuned for clinical environments.
+Receives raw binary audio chunks over the WebSocket, accumulates them in a buffer, and transcribes them in two stages:
+
+1. **Primary — OpenAI Whisper API** (`whisper-1`): Sends the accumulated audio bytes directly to the cloud Whisper endpoint. Requires `OPENAI_API_KEY` in `.env`. Provides significantly higher accuracy for clinical speech with medical terminology.
+2. **Fallback — Google Speech Recognition** (free, no key): Used automatically when Whisper API is unavailable or the key is not set.
+
+Supports WebM, OGG, MP3, WAV, and FLAC; non-WAV formats are auto-converted via `pydub` + `ffmpeg`. Two independent thread-pool executors handle partial (live) and final transcriptions to prevent starvation.
 
 ---
 
 ### Agent 2 — Extract Agent
 **File:** `backend/agents/extract_agent.py`
 
-Converts the raw transcript into a fully structured `SBARData` JSON object by prompting **Claude** with a strict JSON schema. If Claude is unavailable (no API key, quota, network error), it lazy-loads a local **HuggingFace Flan-T5** model (`hf_extract_agent.py`) as a fallback. The output schema covers:
+Converts the raw transcript into a fully structured `SBARData` JSON object using a local **HuggingFace Flan-T5** model (`google/flan-t5-base` via `hf_extract_agent.py`). No external API key required — the model is downloaded once and cached locally (~900 MB). Uses multiple focused QA-style prompts that Flan-T5 excels at, extracting each SBAR field independently.
+
+Output schema covers:
 
 - `patient` — name, age, MRN, room
 - `situation` — primary diagnosis, admission reason, current status
@@ -360,7 +370,7 @@ Alerts are sorted HIGH → MEDIUM → LOW and each carries a `severity`, `catego
 ### Agent 4 — Bridge Agent
 **File:** `backend/agents/bridge_agent.py`
 
-Generates the **final human-readable SBAR report** using Claude. The output is a structured text document (not HTML) formatted for bedside tablet display with seven sections: Patient Banner, Situation, Background, Assessment, Recommendation, Risk Alerts, and Handoff Details. Falls back to a template-formatted string if Claude is unavailable.
+Generates the **final human-readable SBAR report** using a deterministic template renderer — no API key required. The output is a structured text document (not HTML) formatted for bedside tablet display with eight sections: Patient Banner, Situation, Background, Assessment (full vitals + labs), Recommendation (care plan + action items), Risk Alerts (with HIGH/MEDIUM/LOW markers), Risk Score, and Handoff Details. Runs instantly with zero latency.
 
 ---
 
@@ -409,22 +419,24 @@ Queries the database for all prior sessions matching the current patient's MRN o
 ### Agent 8 — Educator Agent
 **File:** `backend/agents/educator_agent.py`
 
-Scans the transcript for medical terminology and generates plain-language explanations for each term found. Uses Claude for rich, contextual explanations; falls back to a built-in ICU/hospital terminology dictionary (~30+ terms) when Claude is unavailable. Covers terms like `sepsis`, `vasopressor`, `MAP`, `lactate`, `procalcitonin`, `central line`, `intubation`, `rapid response`, `DNR`, and more. Returns a `EducatorReport` with `ClinicalTip` entries.
+Scans the transcript for medical terminology and generates plain-language explanations for each term found using a built-in ICU/hospital terminology dictionary (30+ terms). No external API required. Covers terms like `sepsis`, `vasopressor`, `MAP`, `lactate`, `procalcitonin`, `central line`, `intubation`, `rapid response`, `DNR`, and more. Also surfaces condition-specific evidence-based care tips (sepsis, pneumonia, heart failure, diabetes, stroke) and relevant clinical protocols. Returns an `EducatorReport` with `ClinicalTip` entries.
 
 ---
 
 ### Agent 9 — Debrief Agent
 **File:** `backend/agents/debrief_agent.py`
 
-Evaluates the quality of the handoff communication for Quality Improvement (QI) programs. Uses a deterministic scoring rubric for consistency, with optional Claude-generated personalised coaching notes.
+Evaluates the quality of the handoff communication for Quality Improvement (QI) programs. Uses a fully deterministic scoring rubric for consistency. No external API required.
 
 | Scoring Dimension | Max Points |
 |---|---|
-| SBAR completeness | 40 pts |
-| Clarity and specificity | 20 pts |
-| Critical information coverage | 20 pts |
+| SBAR completeness | 10 pts |
+| Clarity and specificity | 10 pts |
+| Patient safety | 10 pts |
+| SBAR structure adherence | 10 pts |
 | Time efficiency | 10 pts |
-| Actionable language | 10 pts |
+
+Total is normalised to 0–100 with letter grade A–F. Coaching notes are generated deterministically from the weakest scoring dimension.
 
 Returns a `DebriefReport` with a `HandoffScorecard`, strengths, improvement areas, and coaching feedback.
 
@@ -433,15 +445,15 @@ Returns a `DebriefReport` with a `HandoffScorecard`, strengths, improvement area
 ### Agent 10 — Billing Agent
 **File:** `backend/agents/billing_agent.py`
 
-Analyses the structured SBAR to suggest appropriate medical billing codes, supporting revenue integrity and documentation completeness.
+Analyses the structured SBAR to suggest appropriate medical billing codes, supporting revenue integrity and documentation completeness. Uses **semantic similarity** (HuggingFace `sentence-transformers/all-MiniLM-L6-v2`) to match the clinical context against an ICD-10 code pool — no keyword matching required.
 
 | Code Type | Examples |
 |---|---|
-| **ICD-10 Diagnosis** | 18 codes: A41.9 (Sepsis), R65.21 (Septic shock), N17.9 (AKI), J96.01 (Resp Failure), I50.9 (Heart Failure), I63.9 (Stroke), I21.9 (MI), J44.1 (COPD exac.), I26.99 (PE), I48.91 (A-fib) and more |
+| **ICD-10 Diagnosis** | 38-entry pool: A41.9 (Sepsis), R65.21 (Septic shock), N17.9 (AKI), J96.01 (Resp Failure), I50.9 (Heart Failure), I63.9 (Stroke), I21.9 (MI), J44.1 (COPD exac.), I26.99 (PE), I48.91 (A-fib) and more |
 | **CPT Procedure** | 8 codes: critical care (99291), central line (36556), arterial line (36620), intubation (31500), CRRT (90945), chest tube (32551), foley (51702), bronchoscopy (31622), LP (62270) |
 | **Complexity level** | LOW / MODERATE / HIGH — complexity-stratified billing tips for each level |
 
-Returns a `BillingReport` with `CodeSuggestion` entries each carrying a confidence score.
+Returns a `BillingReport` with `CodeSuggestion` entries each carrying a confidence score (cosine similarity threshold 0.38).
 
 ---
 
@@ -450,6 +462,8 @@ Returns a `BillingReport` with `CodeSuggestion` entries each carrying a confiden
 
 Simulates a Clinical Decision Support (CDS) system by retrieving condition-relevant clinical guidelines and research. Matches the primary diagnosis against a curated evidence database and returns `EvidenceResource` records with title, source, URL, summary, and relevance score.
 
+Uses **semantic similarity** (HuggingFace `sentence-transformers/all-MiniLM-L6-v2`) to match the clinical context against a curated evidence database — cosine similarity threshold 0.30. No internet or API key required after model download.
+
 **12 guidelines embedded** across: Sepsis (SSC 2021, EGDT NEJM), Pneumonia (ATS/IDSA 2019), ARDS (ARDSNet + ERS/ATS/ESICM 2023 Berlin update), AKI (KDIGO 2012), Heart Failure (AHA/ACC 2022), ACS/MI (AHA/ACC 2023), Stroke (AHA/ASA 2019), COPD (GOLD 2025), PE (ESC 2019), DKA (ADA Standards 2024).
 
 ---
@@ -457,7 +471,7 @@ Simulates a Clinical Decision Support (CDS) system by retrieving condition-relev
 ### Agent 12 — CMIO Agent
 **File:** `backend/agents/cmio_agent.py`
 
-Aggregates system-wide session data to produce executive-level **Morning Briefings** for the Chief Medical Information Officer (or charge nurse / supervisor). Uses **Google Gemini** as primary AI provider with **Claude** as fallback. The briefing includes:
+Aggregates system-wide session data to produce executive-level **Morning Briefings** for the Chief Medical Information Officer (or charge nurse / supervisor). Uses **Google Gemini 2.5 Flash** exclusively (`GEMINI_API_KEY` required). Falls back to a deterministic rule-based summary when Gemini is unavailable — no Claude dependency. The briefing includes:
 
 - Patient census summary and acuity breakdown
 - Top recurring risk categories across all handoffs
@@ -516,11 +530,12 @@ npm run preview    # Preview production build locally
 | WebSockets | FastAPI native WebSocket |
 | Database | SQLite via `aiosqlite` |
 | Auth | `python-jose` (JWT) + `passlib[bcrypt]` |
-| AI orchestration | LangGraph (directed graph pipeline) |
-| Primary AI | Anthropic Claude (`claude-3-5-haiku` / configurable) |
-| CMIO AI | Google Gemini (`gemini-flash-latest`) |
-| Fallback AI | HuggingFace `google/flan-t5-base` (local, no API key) |
-| Speech-to-text | `SpeechRecognition` + Google Speech API (free tier) |
+| AI orchestration | LangGraph (directed graph, parallel `asyncio.gather`) |
+| Transcription (primary) | OpenAI Whisper API (`whisper-1`) |
+| Transcription (fallback) | `SpeechRecognition` + Google Speech API (free tier) |
+| SBAR extraction | HuggingFace `google/flan-t5-base` (local, ~900 MB download once) |
+| Semantic search (billing / literature) | HuggingFace `sentence-transformers/all-MiniLM-L6-v2` (local) |
+| CMIO briefings | Google Gemini 2.5 Flash (`gemini-2.5-flash`) |
 | Audio conversion | `pydub` + `imageio-ffmpeg` (WebM → WAV) |
 | Drug data | OpenFDA REST API |
 | Excel export | `openpyxl` |
@@ -606,9 +621,9 @@ python scripts/generate_feed_excel.py
 Create a `.env` file in the project root:
 
 ```env
-# AI Providers (all optional — system works in demo/fallback mode without keys)
-ANTHROPIC_API_KEY=sk-ant-...       # Claude for Extract, Bridge, Debrief, Educator
-GEMINI_API_KEY=AIza...             # Gemini for CMIO Briefings
+# AI Providers
+OPENAI_API_KEY=sk-proj-...         # Whisper API for transcription (Agent 1 primary)
+GEMINI_API_KEY=AIza...             # Gemini 2.5 Flash for CMIO Briefings (Agent 12)
 
 # JWT
 MEDRELAY_JWT_SECRET=your-secret-key-here
@@ -623,7 +638,7 @@ MEDRELAY_LOCKOUT_MINUTES=15
 MEDRELAY_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
 ```
 
-> **No keys? No problem.** All agents that call Claude fall back to deterministic heuristics or a HuggingFace local model. The Relay Agent uses Google's free Speech Recognition tier (no key). The system runs a complete demo pipeline with rich hardcoded data when no live transcript is available.
+> **No keys? No problem.** All agents run locally via HuggingFace models (Flan-T5, all-MiniLM-L6-v2) or deterministic logic — no Claude or Anthropic dependency anywhere. If `OPENAI_API_KEY` is not set, transcription falls back to Google's free Speech Recognition tier. If `GEMINI_API_KEY` is not set, the CMIO briefing uses a deterministic rule-based summary. The system runs a complete demo pipeline with rich hardcoded data when no live transcript is available.
 
 ---
 
@@ -664,7 +679,7 @@ MedRelay/
 │   ├── fda_client.py         # OpenFDA API client
 │   └── agents/
 │       ├── relay_agent.py    # Agent 1  — Speech-to-text
-│       ├── extract_agent.py  # Agent 2  — SBAR extraction (Claude/HF)
+│       ├── extract_agent.py  # Agent 2  — SBAR extraction (HuggingFace Flan-T5)
 │       ├── sentinel_agent.py # Agent 3  — Risk & vital alerts
 │       ├── bridge_agent.py   # Agent 4  — Report generation
 │       ├── compliance_agent.py # Agent 5 — NPSG/CMS audit
@@ -675,8 +690,10 @@ MedRelay/
 │       ├── billing_agent.py  # Agent 10 — ICD-10 / CPT coding
 │       ├── literature_agent.py # Agent 11 — Evidence / guidelines
 │       ├── cmio_agent.py     # Agent 12 — Executive briefings
-│       ├── staffing_agent.py # Staffing analytics helper
-│       └── hf_extract_agent.py # HuggingFace local SBAR fallback
+│       ├── staffing_agent.py # Staffing analytics — rule-based auto-reassignment
+│       ├── hf_extract_agent.py # HuggingFace Flan-T5 SBAR extraction (primary engine)
+│       ├── hf_billing_agent.py # HuggingFace all-MiniLM-L6-v2 ICD-10 semantic matching
+│       └── hf_literature_agent.py # HuggingFace all-MiniLM-L6-v2 guideline semantic search
 ├── frontend/
 │   ├── src/
 │   │   ├── App.jsx           # Router, auth guard

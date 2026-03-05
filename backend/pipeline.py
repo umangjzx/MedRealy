@@ -1,13 +1,15 @@
-﻿"""
+"""
 MedRelay — Agent Orchestration Pipeline
 Runs the 4-agent handoff pipeline sequentially:
   Relay -> Extract -> Sentinel -> Bridge
 Falls back to rich hardcoded demo data when Claude/OpenAI API keys are unavailable.
 """
 
+import asyncio
+import time
 import traceback
 from datetime import datetime
-from typing import TypedDict, List, Optional
+from typing import Dict, TypedDict, List, Optional
 from langgraph.graph import StateGraph, START, END
 from backend.agents.relay_agent import RelayAgent
 from backend.agents.extract_agent import ExtractAgent
@@ -361,6 +363,8 @@ class HandoffState(TypedDict):
     billing: Optional[BillingReport]
     literature: Optional[LiteratureReport]
     final_report: Optional[FinalReport]
+    # Per-node wall-clock timings (ms) — written by each node
+    node_timings: Dict[str, float]
 
 
 class HandoffPipeline:
@@ -376,87 +380,122 @@ class HandoffPipeline:
         self.billing = BillingAgent()
         self.literature = LiteratureAgent()
 
-        # Build LangGraph workflow
+        # ── LangGraph workflow ─────────────────────────────────────────────
+        # Topology:
+        #   transcribe -> extract --(has_report?)--> bridge -> END
+        #                         \--> sentinel -> parallel_agents -> bridge
+        #
+        # parallel_agents runs all 7 specialists concurrently via asyncio.gather
+        # so their combined latency == the slowest single agent (not their sum).
         workflow = StateGraph(HandoffState)
 
-        workflow.add_node("transcribe", self._transcribe_node)
-        workflow.add_node("extract", self._extract_node)
-        workflow.add_node("sentinel", self._sentinel_node)
-        
-        # Parallel agents
-        workflow.add_node("compliance", self._compliance_node)
-        workflow.add_node("pharma", self._pharma_node)
-        workflow.add_node("trend", self._trend_node)
-        workflow.add_node("educator", self._educator_node)
-        workflow.add_node("debrief", self._debrief_node)
-        workflow.add_node("billing", self._billing_node)
-        workflow.add_node("literature", self._literature_node)
-        
-        # Aggregation
-        workflow.add_node("bridge", self._bridge_node)
+        workflow.add_node("transcribe",      self._transcribe_node)
+        workflow.add_node("extract",         self._extract_node)
+        workflow.add_node("sentinel",        self._sentinel_node)
+        workflow.add_node("parallel_agents", self._parallel_agents_node)
+        workflow.add_node("bridge",          self._bridge_node)
 
-        # Edges
         workflow.add_edge(START, "transcribe")
         workflow.add_edge("transcribe", "extract")
-        workflow.add_edge("extract", "sentinel")
-        
-        # Parallel execution
-        workflow.add_edge("sentinel", "compliance")
-        workflow.add_edge("sentinel", "pharma")
-        workflow.add_edge("sentinel", "trend")
-        workflow.add_edge("sentinel", "educator")
-        workflow.add_edge("sentinel", "debrief")
-        workflow.add_edge("sentinel", "billing")
-        workflow.add_edge("sentinel", "literature")
-        
-        # Fan-in
-        workflow.add_edge("compliance", "bridge")
-        workflow.add_edge("pharma", "bridge")
-        workflow.add_edge("trend", "bridge")
-        workflow.add_edge("educator", "bridge")
-        workflow.add_edge("debrief", "bridge")
-        workflow.add_edge("billing", "bridge")
-        workflow.add_edge("literature", "bridge")
-        
-        workflow.add_edge("bridge", END)
+
+        # Conditional: if extract already produced a final_report (e.g. empty
+        # transcript), skip all agents and go straight to bridge for assembly.
+        workflow.add_conditional_edges(
+            "extract",
+            lambda s: "bridge" if s.get("final_report") else "sentinel",
+            {"sentinel": "sentinel", "bridge": "bridge"},
+        )
+
+        workflow.add_edge("sentinel",        "parallel_agents")
+        workflow.add_edge("parallel_agents", "bridge")
+        workflow.add_edge("bridge",          END)
 
         self.app = workflow.compile()
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_state(
+        outgoing: str,
+        incoming: str,
+        *,
+        audio_chunks: list | None = None,
+        transcript: str | None = None,
+        is_demo: bool = False,
+        language: str = "en",
+    ) -> HandoffState:
+        """Factory: build a fully-initialised HandoffState without repeating defaults."""
+        return HandoffState(
+            audio_chunks=audio_chunks or [],
+            outgoing_nurse=outgoing,
+            incoming_nurse=incoming,
+            is_demo=is_demo,
+            language=language,
+            transcript=transcript,
+            sbar=None,
+            alerts=[],
+            compliance=None,
+            pharma=None,
+            trend=None,
+            educator=None,
+            debrief=None,
+            billing=None,
+            literature=None,
+            final_report=None,
+            node_timings={},
+        )
+
+    @staticmethod
+    def _tick() -> float:
+        """Return current perf-counter value."""
+        return time.perf_counter()
+
+    @staticmethod
+    def _tock(t0: float) -> float:
+        """Return elapsed milliseconds since t0."""
+        return round((time.perf_counter() - t0) * 1000, 1)
 
     # ── Nodes ─────────────────────────────────────────────────────────────────
 
     async def _transcribe_node(self, state: HandoffState):
-        # 1. Check if transcript already provided (e.g. wrapper or demo)
-        t = state.get("transcript")
-        if t is not None:
-            return {"transcript": t}
-        
-        # 2. Check for demo mode without transcript (should rely on downstream default, but safe to set empty)
-        if state.get("is_demo"):
-            return {"transcript": DEMO_TRANSCRIPT}
+        t0 = self._tick()
+        # 1. Transcript already provided (run_from_transcript or demo injection)
+        txt = state.get("transcript")
+        if txt is not None:
+            return {"transcript": txt, "node_timings": {**state.get("node_timings", {}), "transcribe": self._tock(t0)}}
 
-        # 3. Process audio chunks
+        # 2. Demo mode: use the canonical demo transcript
+        if state.get("is_demo"):
+            return {"transcript": DEMO_TRANSCRIPT, "node_timings": {**state.get("node_timings", {}), "transcribe": self._tock(t0)}}
+
+        # 3. Transcribe from accumulated audio chunks
         chunks = state.get("audio_chunks", [])
         if not chunks:
-            return {"transcript": ""}
+            return {"transcript": "", "node_timings": {**state.get("node_timings", {}), "transcribe": self._tock(t0)}}
 
         language = state.get("language", "en")
         relay = RelayAgent()
         for chunk in chunks:
             await relay.process_audio_chunk(chunk)
         new_transcript = await relay.transcribe_full(language=language)
-        return {"transcript": new_transcript}
+        ms = self._tock(t0)
+        print(f"[Pipeline] transcribe completed in {ms}ms ({len(new_transcript)} chars)")
+        return {"transcript": new_transcript, "node_timings": {**state.get("node_timings", {}), "transcribe": ms}}
 
     async def _extract_node(self, state: HandoffState):
+        t0 = self._tick()
+        timings = state.get("node_timings", {})
         transcript = state.get("transcript") or ""
         is_demo = state.get("is_demo", False)
-        
-        # Early exit check for empty/missing transcript in non-demo mode
-        if not is_demo and (not transcript or not transcript.strip()):
-            # Return empty/error state to flow through
-            # In a real graph we might branch here, but linear flow works if downstream handles empty
+
+        # Short-circuit: no transcript captured in live mode  →  set final_report
+        # so the conditional edge after this node routes straight to bridge.
+        if not is_demo and not transcript.strip():
+            print("[Pipeline] extract: no transcript — skipping agents")
             return {
                 "sbar": SBARData(),
                 "alerts": [RiskAlert(severity="LOW", category="missing", description="No transcript captured.")],
+                "node_timings": {**timings, "extract": self._tock(t0)},
                 "final_report": FinalReport(
                     sbar=SBARData(),
                     alerts=[],
@@ -464,249 +503,221 @@ class HandoffPipeline:
                     incoming_nurse=state["incoming_nurse"],
                     timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     rendered=_missing_transcript_rendered(state["outgoing_nurse"], state["incoming_nurse"]),
-                    is_demo=False
-                )
+                    is_demo=False,
+                ),
             }
 
         sbar = SBARData()
         try:
             sbar = await self.extract.extract(transcript)
         except Exception as e:
-            print(f"[Graph] Extract failed: {e}")
+            print(f"[Pipeline] extract agent error: {e}")
 
-        # Fallback Logic
-        using_real_transcript = transcript and transcript.strip() != DEMO_TRANSCRIPT.strip()
-        
+        using_real_transcript = bool(transcript.strip()) and transcript.strip() != DEMO_TRANSCRIPT.strip()
+
         if _sbar_is_empty(sbar):
             if is_demo:
-                print("[Graph] Demo fallback")
+                print("[Pipeline] extract: demo SBAR fallback")
+                ms = self._tock(t0)
                 return {
-                    "sbar": _demo_sbar(), 
+                    "sbar": _demo_sbar(),
                     "alerts": _demo_alerts(),
-                    "transcript": DEMO_TRANSCRIPT 
+                    "transcript": DEMO_TRANSCRIPT,
+                    "node_timings": {**timings, "extract": ms},
                 }
-            elif using_real_transcript:
-                print("[Graph] Regex fallback")
+            if using_real_transcript:
+                print("[Pipeline] extract: regex SBAR fallback")
                 sbar = _sbar_from_transcript(transcript)
                 alerts = _alerts_from_sbar(sbar)
-                return {"sbar": sbar, "alerts": alerts}
-            else:
-                # Completely failed
-                return {
-                    "sbar": SBARData(), 
-                    "alerts": [RiskAlert(severity="LOW", category="missing", description="No transcript captured.")]
-                }
-        
-        return {"sbar": sbar}
+                ms = self._tock(t0)
+                return {"sbar": sbar, "alerts": alerts, "node_timings": {**timings, "extract": ms}}
+            # Nothing to work with
+            ms = self._tock(t0)
+            return {
+                "sbar": SBARData(),
+                "alerts": [RiskAlert(severity="LOW", category="missing", description="No transcript captured.")],
+                "node_timings": {**timings, "extract": ms},
+            }
+
+        ms = self._tock(t0)
+        print(f"[Pipeline] extract completed in {ms}ms")
+        return {"sbar": sbar, "node_timings": {**timings, "extract": ms}}
 
     async def _sentinel_node(self, state: HandoffState):
+        t0 = self._tick()
+        timings = state.get("node_timings", {})
         sbar = state.get("sbar")
-        # If alerts already populated (e.g. via fallback), return existing or merge
-        # But usually sentinel adds value. If sbar is empty, return empty.
+
         if not sbar or _sbar_is_empty(sbar):
-            return {"alerts": state.get("alerts", [])}
-        
+            return {"alerts": state.get("alerts", []), "node_timings": {**timings, "sentinel": self._tock(t0)}}
+
         try:
             alerts = await self.sentinel.check(sbar)
-            
-            # Calculate Risk Score (Mindblowing Feature)
             try:
-                # If ExtractAgent didn't populate it (or we want to ensure it's calculated)
                 if not sbar.risk_score or sbar.risk_score.score == 0:
-                   sbar.risk_score = self.sentinel.calculate_raw_score(sbar, alerts)
+                    sbar.risk_score = self.sentinel.calculate_raw_score(sbar, alerts)
             except Exception as e:
-                print(f"[Sentinel] Score calc failed: {e}")
+                print(f"[Pipeline] sentinel risk-score calc failed: {e}")
+            ms = self._tock(t0)
+            print(f"[Pipeline] sentinel completed in {ms}ms ({len(alerts)} alerts)")
+            return {"alerts": alerts, "sbar": sbar, "node_timings": {**timings, "sentinel": ms}}
+        except Exception as e:
+            print(f"[Pipeline] sentinel agent error: {e}")
+            return {"alerts": state.get("alerts", []), "node_timings": {**timings, "sentinel": self._tock(t0)}}
 
-            return {"alerts": alerts, "sbar": sbar}
-        except Exception:
-            return {"alerts": state.get("alerts", [])}
+    async def _parallel_agents_node(self, state: HandoffState):
+        """
+        Run all 7 specialist agents concurrently via asyncio.gather.
+        Combined latency = slowest single agent (not the sum of all).
+        Each agent is individually error-isolated; a failure returns an empty report.
+        """
+        t0 = self._tick()
+        timings = state.get("node_timings", {})
+        sbar     = state.get("sbar")
+        transcript = state.get("transcript", "")
+        alerts   = state.get("alerts", [])
+        is_demo  = state.get("is_demo", False)
 
-    async def _compliance_node(self, state: HandoffState):
-        sbar = state.get("sbar")
-        transcript = state.get("transcript")
-        if not sbar or not transcript:
-             return {"compliance": ComplianceReport()}
-        try:
-            res = await self.compliance.audit(sbar, state.get("alerts", []), transcript)
-            return {"compliance": res}
-        except Exception:
-            return {"compliance": ComplianceReport()}
+        async def _run(name: str, coro):
+            try:
+                return await coro
+            except Exception as e:
+                print(f"[Pipeline] parallel/{name} failed: {e}")
+                return None
 
-    async def _pharma_node(self, state: HandoffState):
-        sbar = state.get("sbar")
-        if not sbar:
-            return {"pharma": PharmaReport()}
-        try:
-            res = await self.pharma.analyse(sbar)
-            return {"pharma": res}
-        except Exception:
-            return {"pharma": PharmaReport()}
+        # ── Coroutines for each specialist ────────────────────────────────────
+        async def run_compliance():
+            if not sbar or not transcript:
+                return ComplianceReport()
+            return await self.compliance.audit(sbar, alerts, transcript) or ComplianceReport()
 
-    async def _trend_node(self, state: HandoffState):
-        sbar = state.get("sbar")
-        try:
-            if state.get("is_demo"):
-                return {"trend": _demo_trend_report()}
-            
+        async def run_pharma():
+            if not sbar:
+                return PharmaReport()
+            return await self.pharma.analyse(sbar) or PharmaReport()
+
+        async def run_trend():
+            if is_demo:
+                return _demo_trend_report()
             if not sbar or not sbar.patient:
-                return {"trend": TrendReport()}
-
+                return TrendReport()
             history = await get_history_for_trends(sbar.patient.mrn or "", sbar.patient.name or "")
-            res = await self.trend.analyse(sbar, history)
-            return {"trend": res}
-        except Exception:
-            return {"trend": TrendReport()}
+            return await self.trend.analyse(sbar, history) or TrendReport()
 
-    async def _educator_node(self, state: HandoffState):
-        sbar = state.get("sbar")
-        transcript = state.get("transcript")
-        if not sbar or not transcript:
-             return {"educator": EducatorReport()}
-        try:
-            res = await self.educator.educate(sbar, transcript)
-            return {"educator": res}
-        except Exception:
-            return {"educator": EducatorReport()}
-    
-    async def _debrief_node(self, state: HandoffState):
-        sbar = state.get("sbar")
-        transcript = state.get("transcript")
-        if not sbar or not transcript:
-            return {"debrief": DebriefReport()}
-        try:
-            res = await self.debrief.evaluate(sbar, state.get("alerts", []), transcript)
-            return {"debrief": res}
-        except Exception:
-            return {"debrief": DebriefReport()}
-            
-    async def _billing_node(self, state: HandoffState):
-        sbar = state.get("sbar")
-        if not sbar:
-             return {"billing": BillingReport()}
-        try:
-            res = await self.billing.analyse(sbar)
-            return {"billing": res}
-        except Exception:
-            return {"billing": BillingReport()}
+        async def run_educator():
+            if not sbar or not transcript:
+                return EducatorReport()
+            return await self.educator.educate(sbar, transcript) or EducatorReport()
 
-    async def _literature_node(self, state: HandoffState):
-        sbar = state.get("sbar")
-        if not sbar:
-             return {"literature": LiteratureReport(topic="N/A")}
-        try:
-            res = await self.literature.fetch_evidence(sbar)
-            return {"literature": res}
-        except Exception:
-            return {"literature": LiteratureReport(topic="N/A")}
+        async def run_debrief():
+            if not sbar or not transcript:
+                return DebriefReport()
+            return await self.debrief.evaluate(sbar, alerts, transcript) or DebriefReport()
+
+        async def run_billing():
+            if not sbar:
+                return BillingReport()
+            return await self.billing.analyse(sbar) or BillingReport()
+
+        async def run_literature():
+            if not sbar:
+                return LiteratureReport(topic="N/A")
+            return await self.literature.fetch_evidence(sbar) or LiteratureReport(topic="N/A")
+
+        # ── True concurrent execution ─────────────────────────────────────────
+        results = await asyncio.gather(
+            _run("compliance",  run_compliance()),
+            _run("pharma",      run_pharma()),
+            _run("trend",       run_trend()),
+            _run("educator",    run_educator()),
+            _run("debrief",     run_debrief()),
+            _run("billing",     run_billing()),
+            _run("literature",  run_literature()),
+        )
+        compliance, pharma, trend, educator, debrief, billing, literature = results
+
+        ms = self._tock(t0)
+        print(f"[Pipeline] parallel_agents completed in {ms}ms (7 specialists)")
+        return {
+            "compliance":  compliance  or ComplianceReport(),
+            "pharma":      pharma      or PharmaReport(),
+            "trend":       trend       or TrendReport(),
+            "educator":    educator    or EducatorReport(),
+            "debrief":     debrief     or DebriefReport(),
+            "billing":     billing     or BillingReport(),
+            "literature":  literature  or LiteratureReport(topic="N/A"),
+            "node_timings": {**timings, "parallel_agents": ms},
+        }
 
     async def _bridge_node(self, state: HandoffState):
-        # If final_report was pre-calculated (e.g. error state in extract), keep it
+        t0 = self._tick()
+        timings = state.get("node_timings", {})
+
+        # Pre-built final_report (empty transcript short-circuit from extract node)
         if state.get("final_report"):
-            return {}
+            ms = self._tock(t0)
+            return {"node_timings": {**timings, "bridge": ms}}
 
         outgoing = state["outgoing_nurse"]
         incoming = state["incoming_nurse"]
-        is_demo = state.get("is_demo", False)
-        sbar = state.get("sbar") or SBARData()
-        alerts = state.get("alerts") or []
+        is_demo  = state.get("is_demo", False)
+        sbar     = state.get("sbar") or SBARData()
+        alerts   = state.get("alerts") or []
+
+        def _attach_specialists(report: FinalReport) -> FinalReport:
+            report.compliance = state.get("compliance")
+            report.pharma     = state.get("pharma")
+            report.trend      = state.get("trend")
+            report.educator   = state.get("educator")
+            report.debrief    = state.get("debrief")
+            report.billing    = state.get("billing")
+            report.literature = state.get("literature")
+            return report
 
         try:
             final = await self.bridge.generate(sbar, alerts, outgoing, incoming)
-            # Attach extras
-            final.compliance = state.get("compliance")
-            final.pharma = state.get("pharma")
-            final.trend = state.get("trend")
-            final.educator = state.get("educator")
-            final.debrief = state.get("debrief")
-            final.billing = state.get("billing")
-            final.literature = state.get("literature")
-        except Exception:
-            final = FinalReport(
-                sbar=sbar, alerts=alerts, outgoing_nurse=outgoing, incoming_nurse=incoming,
+            final = _attach_specialists(final)
+        except Exception as e:
+            print(f"[Pipeline] bridge agent error: {e}")
+            final = _attach_specialists(FinalReport(
+                sbar=sbar,
+                alerts=alerts,
+                outgoing_nurse=outgoing,
+                incoming_nurse=incoming,
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 rendered=_demo_rendered(outgoing, incoming) if is_demo else "",
                 is_demo=is_demo,
-                compliance=state.get("compliance"),
-                pharma=state.get("pharma"),
-                trend=state.get("trend"),
-                educator=state.get("educator"),
-                debrief=state.get("debrief"),
-                billing=state.get("billing"),
-                literature=state.get("literature")
-            )
-        
-        # Fallback render if bridge failed
-        if not final.rendered:
-             final.rendered = _demo_rendered(outgoing, incoming) if is_demo else ""
+            ))
 
+        if not final.rendered:
+            final.rendered = _demo_rendered(outgoing, incoming) if is_demo else ""
         final.is_demo = is_demo
-        return {"final_report": final}
+
+        ms = self._tock(t0)
+        total_ms = round(sum(timings.values()) + ms, 1)
+        print(f"[Pipeline] bridge completed in {ms}ms | total pipeline: {total_ms}ms")
+        return {"final_report": final, "node_timings": {**timings, "bridge": ms}}
 
     # ── Entry Points ──────────────────────────────────────────────────────────
 
-    async def run(self, audio_chunks: list, outgoing: str, incoming: str, language: str = "en") -> FinalReport:
-        input_state: HandoffState = {
-            "audio_chunks": audio_chunks,
-            "outgoing_nurse": outgoing,
-            "incoming_nurse": incoming,
-            "is_demo": False,
-            "language": language,
-            "transcript": None,
-            "sbar": None,
-            "alerts": [],
-            "final_report": None,
-            "compliance": None,
-            "pharma": None,
-            "trend": None,
-            "educator": None,
-            "debrief": None,
-            "billing": None,
-            "literature": None,
-        }
-        result = await self.app.ainvoke(input_state)
+    async def run(
+        self, audio_chunks: list, outgoing: str, incoming: str, language: str = "en"
+    ) -> FinalReport:
+        """Run the full pipeline from raw audio chunks."""
+        state = self._make_state(outgoing, incoming, audio_chunks=audio_chunks, language=language)
+        result = await self.app.ainvoke(state)
         return result["final_report"]
 
     async def run_demo(self, outgoing: str, incoming: str) -> FinalReport:
-        input_state: HandoffState = {
-            "audio_chunks": [],
-            "outgoing_nurse": outgoing,
-            "incoming_nurse": incoming,
-            "is_demo": True,
-            "language": "en",
-            "transcript": DEMO_TRANSCRIPT,
-            "sbar": None,
-            "alerts": [],
-            "final_report": None,
-            "compliance": None,
-            "pharma": None,
-            "trend": None,
-            "educator": None,
-            "debrief": None,
-            "billing": None,
-            "literature": None,
-        }
-        result = await self.app.ainvoke(input_state)
+        """Run the pipeline with the canonical demo transcript."""
+        state = self._make_state(outgoing, incoming, transcript=DEMO_TRANSCRIPT, is_demo=True)
+        result = await self.app.ainvoke(state)
         return result["final_report"]
-    
-    async def run_from_transcript(self, transcript: str, outgoing: str, incoming: str) -> FinalReport:
-        # For websocket live flow
-        input_state: HandoffState = {
-            "audio_chunks": [],
-            "outgoing_nurse": outgoing,
-            "incoming_nurse": incoming,
-            "is_demo": False,
-            "language": "en",
-            "transcript": transcript,
-            "sbar": None,
-            "alerts": [],
-            "final_report": None,
-            "compliance": None,
-            "pharma": None,
-            "trend": None,
-            "educator": None,
-            "debrief": None,
-            "billing": None,
-            "literature": None,
-        }
-        result = await self.app.ainvoke(input_state)
+
+    async def run_from_transcript(
+        self, transcript: str, outgoing: str, incoming: str
+    ) -> FinalReport:
+        """Run the pipeline from a pre-built transcript (WebSocket live flow)."""
+        state = self._make_state(outgoing, incoming, transcript=transcript)
+        result = await self.app.ainvoke(state)
         return result["final_report"]

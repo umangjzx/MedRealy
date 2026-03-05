@@ -1,14 +1,15 @@
-﻿"""
+"""
 Agent 1 — Relay Agent
-Handles audio accumulation and transcription via SpeechRecognition.
-Uses Google's free Speech Recognition API (no API key required).
-Never falls back to demo transcript during real capture.
+Handles audio accumulation and transcription.
+Primary: OpenAI Whisper API (cloud, high accuracy, medical vocabulary).
+Fallback: Google Speech Recognition (free, no API key required).
 
 Audio format handling:
   - WAV/FLAC/AIFF are natively supported by SpeechRecognition.
   - WebM/OGG/MP3 are converted to WAV via pydub (requires ffmpeg on PATH).
+  - Whisper API accepts all formats directly (no conversion needed).
   - Live partials use a single-pass fast path (no retries).
-  - Final transcription uses a retry strategy: detected format → WAV conversion → fallback.
+  - Final transcription uses a retry strategy with format fallbacks.
 """
 
 import asyncio
@@ -33,6 +34,27 @@ _recognizer = sr.Recognizer()
 # Adjust for ambient noise tolerance
 _recognizer.energy_threshold = 300
 _recognizer.dynamic_energy_threshold = True
+
+# Lazy-loaded OpenAI client (used for Whisper API)
+_openai_client = None
+
+def _get_openai_client():
+    """Return a cached OpenAI client if OPENAI_API_KEY is configured."""
+    global _openai_client
+    if _openai_client is None:
+        try:
+            from backend.config import OPENAI_API_KEY
+            if OPENAI_API_KEY and OPENAI_API_KEY.startswith("sk-"):
+                import openai
+                _openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+                print("[Relay] OpenAI Whisper API client initialised")
+            else:
+                # Sentinel: key missing/invalid — don't retry on every call
+                _openai_client = False
+        except Exception as e:
+            print(f"[Relay] Could not initialise OpenAI client: {e}")
+            _openai_client = False
+    return _openai_client if _openai_client else None
 
 
 def _detect_mime(buf: bytes) -> str:
@@ -79,11 +101,31 @@ LANGUAGE_CODES = {
 }
 
 
-def _do_transcribe(audio_bytes: bytes, ext: str, language: str = "en") -> str:
-    """Write audio to a temp file, run SpeechRecognition, return transcript text.
-    This is synchronous and must be called from a thread executor.
-    Non-native formats are converted to WAV via pydub before recognition.
-    Supports language parameter: 'en', 'hi' (Hindi), 'ta' (Tamil).
+def _do_transcribe_whisper(audio_bytes: bytes, ext: str, language: str = "en") -> str:
+    """Transcribe using the OpenAI Whisper cloud API.
+    Supports all common audio formats directly — no conversion needed.
+    Language codes match Whisper's ISO 639-1 format (en, hi, ta, etc.).
+    """
+    client = _get_openai_client()
+    if not client:
+        raise RuntimeError("OpenAI client not available")
+    filename = f"audio{ext}"
+    audio_file = io.BytesIO(audio_bytes)
+    audio_file.name = filename
+    transcript = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file,
+        language=language,
+    )
+    text = (transcript.text or "").strip()
+    if text:
+        print(f"[Relay] Whisper API transcribed ({ext}, lang={language}): {len(text)} chars")
+    return text
+
+
+def _do_transcribe_google(audio_bytes: bytes, ext: str, language: str = "en") -> str:
+    """Transcribe with Google's free Speech Recognition API (fallback).
+    Requires wav/flac/aiff; other formats are converted first.
     """
     tmp_path = None
     lang_code = LANGUAGE_CODES.get(language, "en-US")
@@ -116,6 +158,17 @@ def _do_transcribe(audio_bytes: bytes, ext: str, language: str = "en") -> str:
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+def _do_transcribe(audio_bytes: bytes, ext: str, language: str = "en") -> str:
+    """Primary dispatcher: try OpenAI Whisper API first, fall back to Google STT."""
+    client = _get_openai_client()
+    if client:
+        try:
+            return _do_transcribe_whisper(audio_bytes, ext, language)
+        except Exception as e:
+            print(f"[Relay] Whisper API error, switching to Google STT: {e}")
+    return _do_transcribe_google(audio_bytes, ext, language)
 
 
 def _transcribe_fast(audio_bytes: bytes, preferred_ext: str, language: str = "en") -> str:

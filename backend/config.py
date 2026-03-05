@@ -1,36 +1,39 @@
 import os
 import secrets
 import warnings
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Always resolve .env from the project root (one level above this file)
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=_env_path, override=True)
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # no longer used for transcription
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # used for Whisper API transcription (Agent 1)
 
-# Validate Anthropic API Key format (simple check)
-if ANTHROPIC_API_KEY and (ANTHROPIC_API_KEY.startswith("http") or "your-openai-api-key" in ANTHROPIC_API_KEY or not ANTHROPIC_API_KEY.startswith("sk-")):
-    warnings.warn(f"Invalid ANTHROPIC_API_KEY detected. Disabling API usage.", stacklevel=2)
-    ANTHROPIC_API_KEY = None
+# Validate OpenAI API key
+if OPENAI_API_KEY and (not OPENAI_API_KEY.startswith("sk-") or "your-openai-api-key" in OPENAI_API_KEY):
+    warnings.warn("Invalid OPENAI_API_KEY detected. Whisper API will fall back to Google STT.", stacklevel=2)
+    OPENAI_API_KEY = None
 
-# Warn (don't crash) if API keys are missing — demo mode still works
-if not ANTHROPIC_API_KEY:
-    warnings.warn("ANTHROPIC_API_KEY not set — Claude extraction/report will fall back to demo data")
+if not OPENAI_API_KEY:
+    warnings.warn("OPENAI_API_KEY not set — Whisper transcription will fall back to Google STT")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    warnings.warn("GEMINI_API_KEY not set — Gemini model will fall back to demo data")
+    warnings.warn("GEMINI_API_KEY not set — CMIO briefing will fall back to deterministic summary")
 
 # ── AI Model Configuration ────────────────────────────────────────────────────
-# Transcription is now handled locally via faster-whisper (no API key needed)
-WHISPER_MODEL = "base"  # faster-whisper model size used in relay_agent.py
+# OpenAI Whisper API model (cloud) — used as primary transcription engine
+WHISPER_API_MODEL = "whisper-1"
+# Local faster-whisper model size (kept for reference; cloud API is preferred when key is set)
+WHISPER_MODEL = "base"
 
-# Claude model for SBAR extraction and report generation
-CLAUDE_MODEL = "claude-sonnet-4-6"
-
-# HuggingFace local model for SBAR extraction (fallback when Claude is unavailable)
+# HuggingFace local model for SBAR extraction (primary extraction engine)
 HF_SBAR_MODEL = "google/flan-t5-base"
+
+# HuggingFace sentence-embedding model used by billing and literature agents
+HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # ── JWT / Authentication ──────────────────────────────────────────────────────
 # IMPORTANT: In production, set MEDRELAY_JWT_SECRET as an environment variable!

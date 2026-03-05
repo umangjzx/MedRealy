@@ -2,30 +2,23 @@
 Agent 12 — CMIO Agent (Chief Medical Intelligence Officer)
 Analyzes system-wide analytics, billing data, and clinical trends
 to provide executive summaries and "Morning Briefings".
+Uses Gemini exclusively. Falls back to a deterministic summary if Gemini is unavailable.
 """
 
 import json
-import anthropic
-import google.generativeai as genai
+import re
+from google import genai
+from google.genai import types as genai_types
 from datetime import datetime
-from backend.config import ANTHROPIC_API_KEY, GEMINI_API_KEY, CLAUDE_MODEL
+from backend.config import GEMINI_API_KEY
 
-# Initialize Gemini if available
-_gemini_model = None
+# Initialize Gemini client
+_gemini_client = None
 if GEMINI_API_KEY:
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel('gemini-flash-latest')
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as e:
         print(f"CMIO Agent: Failed to initialize Gemini client: {e}")
-
-# Only initialize Anthropic client if a valid key is provided AND Gemini is not active
-_client = None
-if ANTHROPIC_API_KEY and not _gemini_model:
-    try:
-        _client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    except Exception:
-        print("CMIO Agent: Failed to initialize Anthropic client (invalid key)")
 
 class CMIOAgent:
     async def generate_briefing(self, stats: dict, recent_alerts: list) -> dict:
@@ -90,11 +83,12 @@ class CMIOAgent:
             data["critical_alerts_24h"] = stats.get("severity_distribution", {}).get("high", 0)
             return data
 
-        if _gemini_model:
+        if _gemini_client:
             try:
-                response = await _gemini_model.generate_content_async(
-                    prompt,
-                    generation_config=genai.types.GenerationConfig(temperature=0.3)
+                response = await _gemini_client.aio.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(temperature=0.3)
                 )
                 content = response.text
                 if "```json" in content:
@@ -104,39 +98,50 @@ class CMIOAgent:
                 return _format_output(json.loads(content))
             except Exception as e:
                 print(f"CMIO Agent (Gemini) Error: {e}")
-                # Fall through to fallback
 
-        if not _client:
-             print("CMIO Agent: No API key available, using demo fallback.")
-             return _format_output({
-                "system_health_score": 85,
-                "narrative_summary": "**Demo Mode:** AI analysis is unavailable because neither Gemini nor Anthropic API keys are configured correctly. Please check `.env`.",
-                "strategic_insights": ["Demo Insight 1: API Key missing", "Demo Insight 2: Using fallback data"],
-                "projected_revenue": 0
-            })
+        # Gemini unavailable — return deterministic demo summary
+        print("CMIO Agent: Gemini unavailable, using deterministic fallback.")
+        return _format_output(_deterministic_briefing(stats))
 
-        try:
-            response = await _client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=1500,
-                temperature=0.3,
-                system="You are an expert Medical Executive AI. Precise, strategic, and data-driven.",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            content = response.content[0].text
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "{" in content:
-                content = content[content.find("{"):content.rfind("}")+1]
-                
-            return _format_output(json.loads(content))
 
-        except Exception as e:
-            print(f"CMIO Agent Error: {e}")
-            return {
-                "system_health_score": 0,
-                "narrative_summary": "AI Analysis unavailable.",
-                "key_insights": ["System error during analysis"],
-                "revenue_forecast": "N/A"
-            }
+def _deterministic_briefing(stats: dict) -> dict:
+    """Rule-based fallback briefing when Gemini is unavailable."""
+    sessions = stats.get("daily_sessions", 0)
+    severity = stats.get("severity_distribution", {})
+    high_count = severity.get("high", 0)
+    compliance = stats.get("signoff_compliance", 100)
+    staffing = stats.get("staffing_status", "unknown")
+
+    # Health score: starts at 100, deducted for risk indicators
+    score = 100
+    score -= min(high_count * 5, 30)          # high alerts penalise
+    score -= max(0, (100 - compliance) // 2)   # low compliance penalises
+    if staffing in ("Red", "yellow"):
+        score -= 15
+    score = max(score, 0)
+
+    insights = []
+    if high_count > 0:
+        insights.append(f"{high_count} high-severity alert(s) require immediate attention")
+    if compliance < 90:
+        insights.append(f"Sign-off compliance at {compliance}% — below target of 90%")
+    if staffing not in ("Green", "unknown"):
+        insights.append(f"Staffing status: {staffing} — consider activating on-call staff")
+    if sessions > 0:
+        insights.append(f"{sessions} handoff session(s) processed today")
+    if not insights:
+        insights.append("Unit operating within normal parameters")
+
+    narrative = (
+        f"Unit processed {sessions} handoff session(s) today. "
+        f"System health score: {score}/100. "
+        + (f"{high_count} high-severity alert(s) active. " if high_count else "No high-severity alerts. ")
+        + f"Sign-off compliance: {compliance}%. Staffing: {staffing}."
+    )
+
+    return {
+        "system_health_score": score,
+        "narrative_summary": narrative,
+        "strategic_insights": insights,
+        "projected_revenue": stats.get("billing_potential", 0),
+    }

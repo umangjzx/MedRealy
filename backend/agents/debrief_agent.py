@@ -14,19 +14,10 @@ Uses a deterministic scoring rubric for consistency. Optionally
 uses Claude to generate personalised coaching notes.
 """
 
-import json
 import re
-import anthropic
-from backend.config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from backend.models import (
     SBARData, RiskAlert, HandoffScorecard, DebriefReport,
 )
-
-_client = None
-if ANTHROPIC_API_KEY:
-    try:
-        _client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    except: pass
 
 
 
@@ -332,46 +323,7 @@ class DebriefAgent:
         grade: str,
         transcript: str,
     ) -> str:
-        # Try Claude
-        if _client:
-            try:
-                return await self._claude_coaching(sbar, scorecards, overall, grade, transcript)
-            except Exception as e:
-                print(f"[DebriefAgent] Claude coaching failed: {e}")
-
-        # Fallback: deterministic coaching
         return self._fallback_coaching(scorecards, overall, grade)
-
-    async def _claude_coaching(
-        self,
-        sbar: SBARData,
-        scorecards: list[HandoffScorecard],
-        overall: float,
-        grade: str,
-        transcript: str,
-    ) -> str:
-        scores_summary = "\n".join(
-            f"- {sc.category}: {sc.score}/{sc.max_score}"
-            + (f" | Issues: {'; '.join(sc.findings)}" if sc.findings else "")
-            for sc in scorecards
-        )
-        prompt = (
-            "You are a nurse educator reviewing a clinical handoff. "
-            "Write a brief, encouraging coaching note (3-5 sentences) "
-            "based on these scores and findings. Be specific, constructive, "
-            "and reference one thing done well and one area to improve.\n\n"
-            f"Overall Score: {overall}/100 (Grade: {grade})\n"
-            f"Category Scores:\n{scores_summary}\n"
-            f"Patient Diagnosis: {sbar.situation.primary_diagnosis or 'Unknown'}\n\n"
-            "Write the coaching note directly (no markdown, no intro)."
-        )
-        response = await _client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=300,
-            temperature=0.4,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return (getattr(response.content[0], "text", "") or "").strip()
 
     @staticmethod
     def _fallback_coaching(
