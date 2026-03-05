@@ -217,7 +217,9 @@ Server → Client (JSON):     { "type": "partial_transcript", "text": "..." }
 | Account lockout | Tracks failed login attempts; locks account after threshold |
 | Rate limiting | `auth_rate_limiter` (login) and `upload_rate_limiter` (file upload) |
 | Security headers | `SecurityHeadersMiddleware` sets `X-Frame-Options`, `X-Content-Type-Options`, `Strict-Transport-Security`, CSP |
-| Request logging | `RequestLoggingMiddleware` emits structured log lines for every request |
+| Request logging | `RequestLoggingMiddleware` — lightweight console log for all requests |
+| **HIPAA audit log** | **`RequestLoggingMiddleware` writes a JSON audit record to `logs/audit.log` for every PHI-adjacent endpoint (`/api/sessions`, `/api/finalise`, `/api/sign`, `/admin`, `/ws/handoff`)** |
+| **Audit record fields** | **UTC timestamp · request UUID · user ID (from JWT) · action · status · latency · IP hash (SHA-256) · session ref hash · outcome** |
 | WebSocket auth | `authenticate_ws_token` validates JWT from the query string on WS upgrade |
 
 ---
@@ -232,9 +234,48 @@ SQLite via `aiosqlite` — no infrastructure required. Tables:
 |---|---|
 | `users` | Credentials, roles, account-lock state |
 | `sessions` | Completed handoff sessions (SBAR, alerts, all agent reports as JSON columns) |
-| `audit_log` | Immutable log of sensitive actions (login, delete, export) |
+| `audit_log` | Immutable DB log of sensitive actions (login, delete, export) |
 
 Key functions: `init_db()`, `save_session()`, `get_session()`, `list_sessions()`, `get_history_for_trends()`.
+
+> **HIPAA audit trail:** In addition to the DB `audit_log` table, every PHI-adjacent API call is also written as a newline-delimited JSON record to `logs/audit.log` (append-only flat file). IP addresses and session IDs are SHA-256 hashed before logging. The `logs/` directory is excluded from version control. Retain for ≥ 6 years per HIPAA §164.530(j).
+
+---
+
+### Trust & Compliance Controls
+
+**File:** `backend/models.py`, `backend/middleware.py`
+
+Every AI-generated report carries two machine-readable trust fields automatically populated on every response:
+
+#### Clinical Safety Disclaimer
+
+All report models (`PharmaReport`, `BillingReport`, `LiteratureReport`, `FinalReport`) include a `disclaimer` field:
+
+```
+MedRelay outputs are clinical decision support only and do not constitute medical advice.
+All treatment, medication, and care decisions remain the sole responsibility of the
+licensed clinician. Always verify AI-generated information against primary clinical
+sources before acting.
+```
+
+This supports FDA SaMD advisory-only classification (21st Century Cures Act) and is required by most hospital procurement processes.
+
+#### Knowledge Base Version Metadata
+
+Every report stamps the exact dataset versions used, enabling audit traceability for regulatory review (FDA, HIPAA, HITRUST):
+
+| Key | Version String |
+|---|---|
+| `drug_interactions` | ISMP-2023 / FDA-Labeling / NICE-CG182 / MHRA-DSU |
+| `high_alert_meds` | ISMP-Acute-Care-2023 |
+| `dose_limits` | FDA-Labeling / ASHP-IDSA-2020 / AHA-HF-2022 |
+| `allergy_classes` | FDA-Labeling / IDSA-2021 / Macy-Romano-JACI-2014 |
+| `vital_thresholds` | SSC-2021 / NEWS2 / BTS-O2 / ACLS |
+| `icd10_codes` | ICD-10-CM-FY2024 (CMS) |
+| `cpt_codes` | AMA-CPT-2024 |
+| `clinical_guidelines` | SSC-2021 / KDIGO-2012 / AHA-ACC-HF-2022 / AHA-ACC-ACS-2023 / AHA-ASA-Stroke-2019 / GOLD-2025 / ESC-PE-2019 / ADA-2024 / ERS-ATS-ARDS-2023 |
+| `compliance_standards` | TJC-NPSG-2024 / CMS-CoP-482 |
 
 ---
 
@@ -613,12 +654,12 @@ MedRelay/
 ├── backend/
 │   ├── main.py               # FastAPI app, all REST + WebSocket routes
 │   ├── pipeline.py           # LangGraph agent orchestration
-│   ├── models.py             # Pydantic data models (SBAR, alerts, reports)
+│   ├── models.py             # Pydantic models — SBAR, reports, CLINICAL_DISCLAIMER, _KB_VERSIONS
 │   ├── database.py           # SQLite async DB helpers
 │   ├── auth.py               # JWT, bcrypt, RBAC helpers
 │   ├── config.py             # Environment config, vital thresholds
 │   ├── constants.py          # Roles, permissions, demo transcript
-│   ├── middleware.py         # Security headers, rate limiting, request logging
+│   ├── middleware.py         # Security headers, rate limiting, HIPAA audit logger
 │   ├── audio_storage.py      # Recording file persistence helpers
 │   ├── fda_client.py         # OpenFDA API client
 │   └── agents/
