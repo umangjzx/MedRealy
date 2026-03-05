@@ -1,6 +1,32 @@
 from pydantic import BaseModel, Field
 from typing import List, Literal, Optional, Dict, Any
 
+# ── Clinical Safety Disclaimer ──────────────────────────────────────────────
+# Displayed on every report output. Required for FDA SaMD advisory-only
+# classification and hospital procurement compliance.
+CLINICAL_DISCLAIMER = (
+    "MedRelay outputs are clinical decision support only and do not constitute "
+    "medical advice. All treatment, medication, and care decisions remain the "
+    "sole responsibility of the licensed clinician. Always verify AI-generated "
+    "information against primary clinical sources before acting."
+)
+
+# ── Embedded Knowledge Base Versions ────────────────────────────────────────
+# Stamps each report with the exact dataset versions used, enabling audit
+# traceability and supporting regulatory review (FDA, HIPAA, HITRUST).
+_KB_VERSIONS: Dict[str, str] = {
+    "drug_interactions":    "ISMP-2023 / FDA-Labeling / NICE-CG182 / MHRA-DSU",
+    "high_alert_meds":      "ISMP-Acute-Care-2023",
+    "dose_limits":          "FDA-Labeling / ASHP-IDSA-2020 / AHA-HF-2022",
+    "allergy_classes":      "FDA-Labeling / IDSA-2021 / Macy-Romano-JACI-2014",
+    "vital_thresholds":     "SSC-2021 / NEWS2 / BTS-O2 / ACLS",
+    "icd10_codes":          "ICD-10-CM-FY2024 (CMS)",
+    "cpt_codes":            "AMA-CPT-2024",
+    "clinical_guidelines":  "SSC-2021 / KDIGO-2012 / AHA-ACC-HF-2022 / AHA-ACC-ACS-2023 / AHA-ASA-Stroke-2019 / GOLD-2025 / ESC-PE-2019 / ADA-2024 / ERS-ATS-ARDS-2023",
+    "compliance_standards": "TJC-NPSG-2024 / CMS-CoP-482",
+}
+
+
 class PatientInfo(BaseModel):
     name: Optional[str] = None
     age: Optional[str] = None
@@ -100,6 +126,13 @@ class PharmaReport(BaseModel):
     dose_alerts: List[DoseAlert] = Field(default_factory=list)
     safe_count: int = 0                              # medications with no flags
     total_medications: int = 0
+    knowledge_base_versions: Dict[str, str] = Field(
+        default_factory=lambda: {
+            k: _KB_VERSIONS[k]
+            for k in ("drug_interactions", "high_alert_meds", "dose_limits", "allergy_classes")
+        }
+    )
+    disclaimer: str = CLINICAL_DISCLAIMER
 
 # ── Agent 7: Trend Agent models ──────────────────────────────────────────────
 
@@ -157,6 +190,13 @@ class BillingReport(BaseModel):
     suggested_cpt_codes: List[CodeSuggestion] = Field(default_factory=list)
     drg_complexity: Literal["LOW", "MODERATE", "HIGH"] = "MODERATE"
     billing_tips: List[str] = Field(default_factory=list)
+    knowledge_base_versions: Dict[str, str] = Field(
+        default_factory=lambda: {
+            k: _KB_VERSIONS[k]
+            for k in ("icd10_codes", "cpt_codes")
+        }
+    )
+    disclaimer: str = CLINICAL_DISCLAIMER
 
 # ── Agent 11: Literature Agent models ────────────────────────────────────────
 
@@ -170,6 +210,10 @@ class EvidenceResource(BaseModel):
 class LiteratureReport(BaseModel):
     topic: str
     resources: List[EvidenceResource] = Field(default_factory=list)
+    knowledge_base_versions: Dict[str, str] = Field(
+        default_factory=lambda: {"clinical_guidelines": _KB_VERSIONS["clinical_guidelines"]}
+    )
+    disclaimer: str = CLINICAL_DISCLAIMER
 
 # ── Final Report (updated with new agent outputs) ────────────────────────────
 
@@ -192,6 +236,9 @@ class FinalReport(BaseModel):
     debrief: Optional[DebriefReport] = None
     billing: Optional[BillingReport] = None
     literature: Optional[LiteratureReport] = None
+    # Trust & compliance metadata
+    disclaimer: str = CLINICAL_DISCLAIMER
+    knowledge_base_versions: Dict[str, str] = Field(default_factory=lambda: dict(_KB_VERSIONS))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
