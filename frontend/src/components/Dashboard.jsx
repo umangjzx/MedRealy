@@ -10,26 +10,45 @@ import CMIOBriefing from "./CMIOBriefing";
 const API = `http://${window.location.hostname}:8000`;
 
 // ─── Stat Card ───────────────────────────────────────────────────────────────
-function StatCard({ label, value, icon, color }) {
+const COLOR_TO_ACCENT = {
+  "text-cyan-400":    "cyan",
+  "text-purple-400":  "purple",
+  "text-red-400":     "red",
+  "text-emerald-400": "emerald",
+  "text-yellow-400":  "amber",
+  "text-amber-400":   "amber",
+  "text-indigo-400":  "indigo",
+};
+
+function StatCard({ label, value, icon, color, trend }) {
+  const accent = COLOR_TO_ACCENT[color] || "indigo";
   return (
-    <div className="glass rounded-xl px-5 py-4">
+    <div className={`stat-card stat-card-${accent} stagger-1`}>
       <div className="flex items-center gap-3">
-        <span className="text-2xl">{icon}</span>
-        <div>
-          <p className={`text-3xl font-bold ${color}`}>{value}</p>
-          <p className="text-xs text-slate-400 mt-0.5">{label}</p>
+        <div className={`stat-card-icon stat-card-icon-${accent}`}>{icon}</div>
+        <div className="min-w-0 flex-1">
+          <p className={`stat-card-value ${color}`}>{value}</p>
+          <p className="stat-card-label">{label}</p>
         </div>
+        {trend !== undefined && (
+          <span className={`text-xs font-bold px-1.5 py-0.5 rounded-md ${trend >= 0 ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
+            {trend >= 0 ? "▲" : "▼"} {Math.abs(trend)}%
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
 // ─── Bar Chart ───────────────────────────────────────────────────────────────
-function BarChart({ data, labelKey, valueKey, color = "bg-cyan-500", title }) {
+function BarChart({ data, labelKey, valueKey, color = "bg-cyan-500", title, badge }) {
   const maxVal = Math.max(...data.map((d) => d[valueKey]), 1);
   return (
-    <div className="glass rounded-xl p-5">
-      <h3 className="text-sm font-semibold text-slate-300 mb-4">{title}</h3>
+    <div className="chart-card">
+      <div className="chart-card-header">
+        <h3 className="chart-card-title">{title}</h3>
+        {badge && <span className="chart-card-badge">{badge}</span>}
+      </div>
       {data.length === 0 ? (
         <p className="text-slate-500 text-sm text-center py-8">No data yet</p>
       ) : (
@@ -40,7 +59,7 @@ function BarChart({ data, labelKey, valueKey, color = "bg-cyan-500", title }) {
                 {d[valueKey]}
               </span>
               <div
-                className={`w-full ${color} rounded-t-sm transition-all duration-300 hover:opacity-80`}
+                className={`w-full ${color} rounded-t transition-all duration-300 hover:opacity-80`}
                 style={{
                   height: `${(d[valueKey] / maxVal) * 100}%`,
                   minHeight: d[valueKey] > 0 ? "4px" : "0",
@@ -385,18 +404,14 @@ function NursePairs({ pairs }) {
 // ─── Tab Bar ─────────────────────────────────────────────────────────────────
 function TabBar({ tabs, active, onChange }) {
   return (
-    <div className="glass rounded-xl p-1.5 inline-flex gap-1.5 mb-6">
+    <div className="dash-tabs">
       {tabs.map((t) => (
         <button
           key={t.key}
           onClick={() => onChange(t.key)}
-          className={`text-sm px-3.5 py-1.5 rounded-lg border transition-all ${
-            active === t.key
-              ? "bg-indigo-500/20 border-indigo-400/40 text-indigo-200"
-              : "border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800"
-          }`}
+          className={`dash-tab ${active === t.key ? "dash-tab-active" : ""}`}
         >
-          {t.icon && <span className="mr-1.5">{t.icon}</span>}
+          {t.icon && <span className="mr-1.5 text-sm">{t.icon}</span>}
           {t.label}
         </button>
       ))}
@@ -478,14 +493,20 @@ export default function Dashboard() {
   ];
 
   return (
-    <div className="max-w-7xl mx-auto mt-8 px-4 pb-12 animate-fadeIn">
+    <div className="max-w-7xl mx-auto px-2 pb-12 animate-fadeIn">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-3xl font-semibold">Analytics Dashboard</h1>
-          <p className="text-slate-400 text-sm mt-1">Handoff performance &amp; clinical insights</p>
+      <div className="flex items-center justify-between mb-5">
+        <div className="flex items-center gap-3">
+          <span className="badge-info">Live Analytics</span>
+          {trendData && <span className="badge-success">Data Loaded</span>}
         </div>
-        <button onClick={load} className="px-4 py-2 btn-ghost rounded-lg text-sm">↻ Refresh</button>
+        <button
+          onClick={load}
+          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/5 border border-transparent hover:border-white/10 transition-all"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+          Refresh
+        </button>
       </div>
 
       {/* CMIO Executive Agent Briefing */}
@@ -515,22 +536,22 @@ export default function Dashboard() {
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
             <BarChart data={a.daily_sessions || []} labelKey="day" valueKey="count" color="bg-cyan-500" title="Daily Handoff Volume" />
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">Alert Severity Distribution</h3>
+            <div className="chart-card">
+              <div className="chart-card-header"><h3 className="chart-card-title">Alert Severity Distribution</h3><span className="chart-card-badge">Risk</span></div>
               <SeverityBars severity={a.severity_distribution || {}} />
             </div>
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">Sign-off Compliance</h3>
+            <div className="chart-card">
+              <div className="chart-card-header"><h3 className="chart-card-title">Sign-off Compliance</h3><span className="chart-card-badge">TJC</span></div>
               <ComplianceMeter compliance={a.signoff_compliance || {}} />
             </div>
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">Handoffs by Hour of Day</h3>
+            <div className="chart-card">
+              <div className="chart-card-header"><h3 className="chart-card-title">Handoffs by Hour of Day</h3></div>
               <HourlyHeatmap hourly={a.hourly_distribution || []} />
             </div>
           </div>
 
-          <div className="glass rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-slate-300 mb-4">Top Diagnoses</h3>
+          <div className="chart-card">
+            <div className="chart-card-header"><h3 className="chart-card-title">Top Diagnoses</h3><span className="chart-card-badge">ICD-10</span></div>
             <DiagnosisList diagnoses={a.top_diagnoses || []} />
           </div>
         </>
@@ -539,16 +560,16 @@ export default function Dashboard() {
       {/* ═══ NURSE PERFORMANCE TAB ═══ */}
       {tab === "nurses" && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="glass rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-slate-300 mb-4">Top Outgoing Nurses (handoffs given)</h3>
+          <div className="chart-card">
+            <div className="chart-card-header"><h3 className="chart-card-title">Top Outgoing Nurses</h3><span className="chart-card-badge">Handoffs Given</span></div>
             <NurseLeaderboard nurses={n.outgoing_nurses} />
           </div>
-          <div className="glass rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-slate-300 mb-4">Top Incoming Nurses (handoffs received)</h3>
+          <div className="chart-card">
+            <div className="chart-card-header"><h3 className="chart-card-title">Top Incoming Nurses</h3><span className="chart-card-badge">Handoffs Received</span></div>
             <NurseLeaderboard nurses={n.incoming_nurses} />
           </div>
-          <div className="glass rounded-xl p-5 lg:col-span-2">
-            <h3 className="text-sm font-semibold text-slate-300 mb-4">Most Frequent Nurse Pairs</h3>
+          <div className="chart-card lg:col-span-2">
+            <div className="chart-card-header"><h3 className="chart-card-title">Most Frequent Nurse Pairs</h3></div>
             <NursePairs pairs={n.top_pairs} />
           </div>
         </div>
@@ -558,7 +579,7 @@ export default function Dashboard() {
       {tab === "trends" && (
         <div className="space-y-4">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="glass rounded-xl p-5">
+            <div className="chart-card">
               <TrendBars
                 data={t.weekly || []} labelKey="week" valueKey="sessions"
                 secondaryKey="fully_signed" color="bg-cyan-500" secondaryColor="bg-emerald-500"
@@ -569,7 +590,7 @@ export default function Dashboard() {
                 <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500 rounded-sm" /> Fully Signed</span>
               </div>
             </div>
-            <div className="glass rounded-xl p-5">
+            <div className="chart-card">
               <TrendBars
                 data={t.monthly || []} labelKey="month" valueKey="sessions"
                 secondaryKey="unique_patients" color="bg-indigo-500" secondaryColor="bg-purple-500"
@@ -582,7 +603,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="glass rounded-xl p-5">
+          <div className="chart-card">
             <TrendBars 
               data={a.efficiency_trend} 
               labelKey="day" 
@@ -592,8 +613,8 @@ export default function Dashboard() {
             />
           </div>
 
-          <div className="glass rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-slate-300 mb-4">Daily Alert Trend (last 30 days)</h3>
+          <div className="chart-card">
+            <div className="chart-card-header"><h3 className="chart-card-title">Daily Alert Trend — last 30 days</h3><span className="chart-card-badge">Clinical Risk</span></div>
             {(t.alert_trend?.length) ? (
               <>
                 <div className="flex items-end gap-1 h-28">
@@ -630,14 +651,14 @@ export default function Dashboard() {
       {tab === "quality" && (
         <div className="space-y-4">
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <div className="glass rounded-xl p-6 flex flex-col items-center justify-center">
+            <div className="chart-card flex flex-col items-center justify-center">
               <QualityRing score={q.overall_quality_score || 0} size={120} />
               <p className="text-sm text-slate-300 mt-3">Overall Handoff Quality</p>
               <p className="text-xs text-slate-500 mt-1">Based on completeness + sign-off compliance</p>
             </div>
 
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">Summary</h3>
+            <div className="chart-card">
+              <div className="chart-card-header"><h3 className="chart-card-title">Summary</h3></div>
               <div className="space-y-3">
                 <div className="flex justify-between text-sm">
                   <span className="text-slate-400">Total Sessions</span>
@@ -662,14 +683,14 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">Field Completeness</h3>
+            <div className="chart-card">
+              <div className="chart-card-header"><h3 className="chart-card-title">Field Completeness</h3><span className="chart-card-badge">CMS</span></div>
               <CompletenessBars data={q.completeness} />
             </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="glass rounded-xl p-5">
+            <div className="chart-card">
               <TrendBars 
                 data={a.quality_trend} 
                 labelKey="day" 
@@ -678,8 +699,8 @@ export default function Dashboard() {
                 title="Daily Quality Score Trend" 
               />
             </div>
-            <div className="glass rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">Risk Heatmap (Top Alerts)</h3>
+            <div className="chart-card">
+              <div className="chart-card-header"><h3 className="chart-card-title">Risk Heatmap — Top Alerts</h3><span className="chart-card-badge">SSC</span></div>
               <RiskHeatmap risks={a.risk_heatmap} />
             </div>
           </div>
